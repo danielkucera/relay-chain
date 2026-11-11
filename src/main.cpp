@@ -2,11 +2,14 @@
 
 #include <debug.h>
 
-/* PC2 */
-#define BLINKY_GPIO_PORT    GPIOC
-#define BLINKY_GPIO_PIN     GPIO_Pin_2
+#include "relay_protocol.h"
+#include "status_led.h"
 
-#define BLINKY_CLOCK        RCC_APB2Periph_GPIOC
+/* PC2 */
+#define STATUS_GPIO_PORT    GPIOC
+#define STATUS_GPIO_PIN     GPIO_Pin_2
+
+#define STATUS_CLOCK        RCC_APB2Periph_GPIOC
 
 #define RELAY_GPIO_PORT     GPIOA
 #define RELAY_GPIO_PIN      GPIO_Pin_2
@@ -51,37 +54,6 @@ void uartBeginTx()
     USART1->CTLR1 |= USART_Mode_Tx;
 }
 
-class LEDBlinker {
-private:
-    GPIO_TypeDef* gpio_port;
-    uint32_t gpio_pin;
-    uint32_t rcc_clock;
-public:
-    LEDBlinker(GPIO_TypeDef* gpio_port, uint32_t gpio_pin, uint32_t rcc_clock) {
-        this->gpio_port = gpio_port;
-        this->gpio_pin = gpio_pin;
-        this->rcc_clock = rcc_clock;
-    }
-
-    void begin() {
-        RCC_APB2PeriphClockCmd(this->rcc_clock, ENABLE);
-        GPIO_InitTypeDef GPIO_InitStructure = {0};
-        GPIO_InitStructure.GPIO_Pin = this->gpio_pin;
-        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
-        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-        GPIO_Init(this->gpio_port, &GPIO_InitStructure);
-    }
-
-    void blink(int time_ms) {
-        GPIO_WriteBit(this->gpio_port, this->gpio_pin, BitAction::Bit_SET);
-        Delay_Ms(time_ms);
-        GPIO_WriteBit(this->gpio_port, this->gpio_pin, BitAction::Bit_RESET);
-        Delay_Ms(time_ms);
-    }
-};
-
-LEDBlinker blinker(BLINKY_GPIO_PORT, BLINKY_GPIO_PIN, BLINKY_CLOCK);
-
 int main(void)
 {
     #ifdef NVIC_PriorityGroup_2
@@ -90,8 +62,6 @@ int main(void)
 	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
 #endif
     SystemCoreClockUpdate();
-    Delay_Init();
-    uartBeginRx(UART_BAUD_RATE);
     
     RCC_APB2PeriphClockCmd(RELAY_CLOCK, ENABLE);
     GPIO_WriteBit(RELAY_GPIO_PORT, RELAY_GPIO_PIN, BitAction::Bit_RESET);
@@ -101,10 +71,80 @@ int main(void)
     relayGpioInit.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(RELAY_GPIO_PORT, &relayGpioInit);
 
-    blinker.begin();
+    RCC_APB2PeriphClockCmd(STATUS_CLOCK, ENABLE);
+    GPIO_InitTypeDef ledGpioInit = {0};
+    ledGpioInit.GPIO_Pin = STATUS_GPIO_PIN;
+    ledGpioInit.GPIO_Mode = GPIO_Mode_Out_PP;
+    ledGpioInit.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(STATUS_GPIO_PORT, &ledGpioInit);
+
+    SysTick->CTLR = 0;
+    SysTick->CNT = 0;
+    SysTick->CTLR = 1;
+    const uint32_t ticksPerMs = SystemCoreClock / 8 / 1000;
+    uint32_t lastTicks = 0;
+    uint32_t fractionalTicks = 0;
+    uint32_t now = 0;
+    bool fault = false;
+    bool txEnabled = false;
+    uint8_t txBuffer[32] = {};
+    uint8_t txHead = 0;
+    uint8_t txTail = 0;
+    RelayNode node;
+    StatusLed statusLed;
+
+    uartBeginRx(UART_BAUD_RATE);
     while (1)
     {
-        blinker.blink(1000);
+        bool frameReceived = false;
+        const uint32_t ticks = SysTick->CNT;
+        const uint32_t elapsedTicks = ticks - lastTicks;
+        lastTicks = ticks;
+        now += elapsedTicks / ticksPerMs;
+        fractionalTicks += elapsedTicks % ticksPerMs;
+        if (fractionalTicks >= ticksPerMs) {
+            fractionalTicks -= ticksPerMs;
+            ++now;
+        }
+
+        const uint16_t status = USART1->STATR;
+        if (status & (USART_FLAG_ORE | USART_FLAG_NE | USART_FLAG_FE | USART_FLAG_PE)) {
+            USART_ReceiveData(USART1);
+            node.resetParser();
+            fault = true;
+        } else if (status & USART_FLAG_RXNE) {
+            const uint8_t byte = USART_ReceiveData(USART1);
+            const NodeResult result = node.receive(byte, now);
+            frameReceived = result.frameComplete;
+            if (result.forward) {
+                if (!txEnabled) {
+                    uartBeginTx();
+                    txEnabled = true;
+                }
+                const uint8_t nextHead = (txHead + 1) % sizeof(txBuffer);
+                if (nextHead == txTail) {
+                    fault = true;
+                } else {
+                    txBuffer[txHead] = result.forwardByte;
+                    txHead = nextHead;
+                }
+            }
+            if (result.error) {
+                fault = true;
+            }
+        }
+
+        if (txHead != txTail && (USART1->STATR & USART_FLAG_TXE)) {
+            USART_SendData(USART1, txBuffer[txTail]);
+            txTail = (txTail + 1) % sizeof(txBuffer);
+        }
+
+        node.update(now);
+        GPIO_WriteBit(RELAY_GPIO_PORT, RELAY_GPIO_PIN,
+                      node.relayEnabled() ? Bit_SET : Bit_RESET);
+        const bool statusOn = statusLed.update(now, fault || txEnabled || node.isInitialized(),
+                                               frameReceived);
+        GPIO_WriteBit(STATUS_GPIO_PORT, STATUS_GPIO_PIN, statusOn ? Bit_SET : Bit_RESET);
     }
 }
 
