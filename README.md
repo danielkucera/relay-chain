@@ -31,10 +31,18 @@ For example, `ff ff 00 00 00 00 00` turns every relay on.
 | `ff` | Turn relay on indefinitely |
 | `01` | Turn relay on for the parameter's number of milliseconds, then off |
 | `02` | Initialization command; leave the relay and timer unchanged |
+| `03` | Restart the device |
 
 A timed command restarts the timer; a zero duration turns the relay off
 immediately. A subsequent on or off command cancels the timer. Unknown commands
 and local frames with invalid checksums leave the relay unchanged.
+
+A valid reset restarts the MCU, returning the relay and status to their startup
+states. A device receiving a broadcast reset first sends all queued bytes and
+waits for the final stop bit to leave TX before restarting. A local reset also
+waits for any previously queued transmission. The master must wait for the
+entire chain to restart and reinitialize it before sending further commands;
+the protocol provides no acknowledgment or flow control.
 
 To initialize the chain, the master can send the broadcast frame
 `ff 02 00 00 00 00 fd`. Each device enables TX upon receiving the address and
@@ -49,6 +57,7 @@ install your distribution's `python3-serial` package). The client uses
 
 ```sh
 python3 relayctl.py ff init
+python3 relayctl.py ff reset
 python3 relayctl.py 0 on
 python3 relayctl.py 1 off
 python3 relayctl.py 02 on-for 5000

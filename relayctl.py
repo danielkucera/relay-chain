@@ -48,9 +48,10 @@ def main(argv=None):
     timed = commands.add_parser("on-for", help="turn relay on for a duration")
     timed.add_argument("milliseconds", type=duration_value)
     commands.add_parser("init", help="initialize the selected device(s)")
+    commands.add_parser("reset", help="restart the selected device(s)")
     args = parser.parse_args(argv)
 
-    commands_by_name = {"on": 0xff, "off": 0x00, "on-for": 0x01, "init": 0x02}
+    commands_by_name = {"on": 0xff, "off": 0x00, "on-for": 0x01, "init": 0x02, "reset": 0x03}
     duration = args.milliseconds if args.action == "on-for" else 0
     frame = make_frame(args.address, commands_by_name[args.action], duration)
 

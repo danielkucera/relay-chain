@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 constexpr uint8_t InitializeCommand = 0x02;
+constexpr uint8_t ResetCommand = 0x03;
 constexpr uint8_t BroadcastAddress = 0xff;
 
 struct ProtocolResult {
@@ -127,6 +128,7 @@ struct NodeResult {
     uint8_t forwardByte;
     bool frameComplete;
     bool error;
+    bool reset;
 };
 
 class RelayNode {
@@ -139,12 +141,14 @@ public:
         result.forwardByte = received.forwardByte;
         result.frameComplete = received.frameComplete;
         if (received.localComplete) {
-            if (!received.checksumValid ||
-                (received.command != InitializeCommand &&
-                 !relay.command(received.command, received.parameter, now))) {
+            if (!received.checksumValid) {
                 result.error = true;
             } else if (received.command == InitializeCommand) {
                 initialized = true;
+            } else if (received.command == ResetCommand) {
+                result.reset = true;
+            } else if (!relay.command(received.command, received.parameter, now)) {
+                result.error = true;
             }
         }
         return result;
@@ -159,4 +163,17 @@ private:
     RelayProtocol protocol;
     RelayControl relay;
     bool initialized = false;
+};
+
+class ResetAfterTransmit {
+public:
+    void request() { pending = true; }
+    bool waiting() const { return pending; }
+    bool ready(bool queueEmpty, bool txEnabled, bool transmitComplete) const
+    {
+        return pending && queueEmpty && (!txEnabled || transmitComplete);
+    }
+
+private:
+    bool pending = false;
 };

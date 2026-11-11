@@ -6,6 +6,37 @@
 
 static constexpr uint8_t InitializeFrame[] = {0, InitializeCommand, 0, 0, 0, 0, InitializeCommand};
 
+static void checkReset()
+{
+    RelayNode node;
+    const uint8_t local[] = {0, ResetCommand, 0, 0, 0, 0, ResetCommand};
+    const uint8_t invalid[] = {0, ResetCommand, 0, 0, 0, 0, 0};
+    const uint8_t broadcast[] = {0xff, ResetCommand, 0, 0, 0, 0, 0xfc};
+    const uint8_t forwarded[] = {1, ResetCommand, 0, 0, 0, 0, 2};
+    const uint8_t* frames[] = {invalid, local, broadcast, forwarded};
+    for (const uint8_t* frame : frames) {
+        for (unsigned i = 0; i < sizeof(local); ++i) {
+            const NodeResult result = node.receive(frame[i], 0);
+            assert(result.frameComplete == (i == 6));
+            assert(result.reset == (i == 6 && (frame == local || frame == broadcast)));
+            assert(result.error == (i == 6 && frame == invalid));
+            assert(result.forward == (frame == broadcast || frame == forwarded));
+            if (frame == broadcast) {
+                assert(result.forwardByte == frame[i]);
+            }
+        }
+    }
+
+    ResetAfterTransmit reset;
+    assert(!reset.ready(true, false, false));
+    reset.request();
+    assert(reset.waiting());
+    assert(!reset.ready(false, true, true));
+    assert(!reset.ready(true, true, false));
+    assert(reset.ready(true, true, true));
+    assert(reset.ready(true, false, false));
+}
+
 static void checkStatusLed()
 {
     StatusLed led;
@@ -125,7 +156,7 @@ static void checkInitialization()
     result = sendLocal(first, invalidInit, 0);
     assert(result.error && !first.isInitialized());
 
-    const uint8_t unknown[] = {0, 3, 0, 0, 0, 0, 3};
+    const uint8_t unknown[] = {0, 4, 0, 0, 0, 0, 4};
     result = sendLocal(first, unknown, 0);
     assert(result.error && !first.relayEnabled());
 
@@ -182,7 +213,7 @@ static void checkBroadcast()
     const uint8_t off[] = {0xff, 0, 0, 0, 0, 0, 0xff};
     const uint8_t timed[] = {0xff, 1, 0, 0, 0, 10, 0xf4};
     const uint8_t invalid[] = {0xff, 0, 0, 0, 0, 0, 0xfe};
-    const uint8_t unknown[] = {0xff, 3, 0, 0, 0, 0, 0xfc};
+    const uint8_t unknown[] = {0xff, 4, 0, 0, 0, 0, 0xfb};
     const uint8_t* frames[] = {on, invalid, unknown, off, timed};
 
     for (const uint8_t* frame : frames) {
@@ -217,6 +248,7 @@ static void checkBroadcast()
 int main()
 {
     checkStatusLed();
+    checkReset();
     checkForwarding();
     checkInitialization();
     checkBroadcast();

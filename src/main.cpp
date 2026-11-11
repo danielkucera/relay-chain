@@ -87,11 +87,13 @@ int main(void)
     uint32_t now = 0;
     bool fault = false;
     bool txEnabled = false;
+    bool forwardingFailed = false;
     uint8_t txBuffer[32] = {};
     uint8_t txHead = 0;
     uint8_t txTail = 0;
     RelayNode node;
     StatusLed statusLed;
+    ResetAfterTransmit reset;
 
     uartBeginRx(UART_BAUD_RATE);
     while (1)
@@ -108,11 +110,12 @@ int main(void)
         }
 
         const uint16_t status = USART1->STATR;
-        if (status & (USART_FLAG_ORE | USART_FLAG_NE | USART_FLAG_FE | USART_FLAG_PE)) {
+        if (!reset.waiting() && (status & (USART_FLAG_ORE | USART_FLAG_NE | USART_FLAG_FE | USART_FLAG_PE))) {
             USART_ReceiveData(USART1);
             node.resetParser();
             fault = true;
-        } else if (status & USART_FLAG_RXNE) {
+            forwardingFailed = false;
+        } else if (!reset.waiting() && (status & USART_FLAG_RXNE)) {
             const uint8_t byte = USART_ReceiveData(USART1);
             const NodeResult result = node.receive(byte, now);
             frameReceived = result.frameComplete;
@@ -124,6 +127,7 @@ int main(void)
                 const uint8_t nextHead = (txHead + 1) % sizeof(txBuffer);
                 if (nextHead == txTail) {
                     fault = true;
+                    forwardingFailed = true;
                 } else {
                     txBuffer[txHead] = result.forwardByte;
                     txHead = nextHead;
@@ -132,11 +136,21 @@ int main(void)
             if (result.error) {
                 fault = true;
             }
+            if (result.reset && !forwardingFailed) {
+                reset.request();
+            }
+            if (result.frameComplete) {
+                forwardingFailed = false;
+            }
         }
 
         if (txHead != txTail && (USART1->STATR & USART_FLAG_TXE)) {
             USART_SendData(USART1, txBuffer[txTail]);
             txTail = (txTail + 1) % sizeof(txBuffer);
+        }
+        if (reset.ready(txHead == txTail, txEnabled, USART1->STATR & USART_FLAG_TC)) {
+            NVIC_SystemReset();
+            while (1) {}
         }
 
         node.update(now);

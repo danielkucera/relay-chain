@@ -34,6 +34,8 @@ class RelayCliTests(unittest.TestCase):
             with self.subTest(address=address):
                 self.assert_frame("ff 02 00 00 00 00 fd", address, "init")
         self.assert_frame("00 02 00 00 00 00 02", "0", "init")
+        self.assert_frame("00 03 00 00 00 00 03", "0", "reset")
+        self.assert_frame("ff 03 00 00 00 00 fc", "ff", "reset")
         self.assert_frame("00 ff 00 00 00 00 ff", "0", "on")
         self.assert_frame("ff ff 00 00 00 00 00", "ff", "on")
         self.assert_frame("02 00 00 00 00 00 02", "02", "off")
@@ -47,6 +49,7 @@ class RelayCliTests(unittest.TestCase):
         for args in (
             ("on",),
             ("init",),
+            ("reset",),
             ("off",),
             ("on-for", "100"),
             ("256", "off"),
