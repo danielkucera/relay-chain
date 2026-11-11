@@ -17,7 +17,7 @@ public:
             pulseOn = !normalState;
             pulseActive = true;
         }
-        if (pulseActive && static_cast<uint32_t>(now - pulseStarted) >= 100) {
+        if (pulseActive && static_cast<uint32_t>(now - pulseStarted) >= 40) {
             pulseActive = false;
         }
         return pulseActive ? pulseOn : normalState;
