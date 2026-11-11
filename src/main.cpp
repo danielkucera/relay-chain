@@ -8,6 +8,10 @@
 
 #define BLINKY_CLOCK        RCC_APB2Periph_GPIOC
 
+#define RELAY_GPIO_PORT     GPIOA
+#define RELAY_GPIO_PIN      GPIO_Pin_2
+#define RELAY_CLOCK         RCC_APB2Periph_GPIOA
+
 extern "C" void NMI_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 extern "C" void HardFault_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 
@@ -52,6 +56,14 @@ int main(void)
     SystemCoreClockUpdate();
     Delay_Init();
     
+    RCC_APB2PeriphClockCmd(RELAY_CLOCK, ENABLE);
+    GPIO_WriteBit(RELAY_GPIO_PORT, RELAY_GPIO_PIN, BitAction::Bit_RESET);
+    GPIO_InitTypeDef relayGpioInit = {0};
+    relayGpioInit.GPIO_Pin = RELAY_GPIO_PIN;
+    relayGpioInit.GPIO_Mode = GPIO_Mode_Out_PP;
+    relayGpioInit.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init(RELAY_GPIO_PORT, &relayGpioInit);
+
     blinker.begin();
     while (1)
     {
@@ -66,4 +78,3 @@ void HardFault_Handler(void)
     {
     }
 }
-
