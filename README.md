@@ -4,6 +4,10 @@ USART1 uses PD6 for RX at 9600 baud, 8N1. TX on PD5 is enabled when a
 nonzero-address frame arrives and remains enabled. A local command does not
 enable TX or generate a frame.
 
+The MCU runs at 8 MHz from the internal oscillator divided by three. UART and
+timer timings use the configured clock; measure power and verify communication
+on the hardware after flashing.
+
 Each frame consists of exactly seven bytes:
 
 | Byte | Meaning |
