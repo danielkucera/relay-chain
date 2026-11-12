@@ -119,11 +119,11 @@ int main(void)
             const uint8_t byte = USART_ReceiveData(USART1);
             const NodeResult result = node.receive(byte, now);
             frameReceived = result.frameComplete;
+            if ((result.forward || result.enableTx) && !txEnabled) {
+                uartBeginTx();
+                txEnabled = true;
+            }
             if (result.forward) {
-                if (!txEnabled) {
-                    uartBeginTx();
-                    txEnabled = true;
-                }
                 const uint8_t nextHead = (txHead + 1) % sizeof(txBuffer);
                 if (nextHead == txTail) {
                     fault = true;
@@ -159,8 +159,7 @@ int main(void)
         node.update(now);
         GPIO_WriteBit(RELAY_GPIO_PORT, RELAY_GPIO_PIN,
                       node.relayEnabled() ? Bit_SET : Bit_RESET);
-        const bool statusOn = statusLed.update(now, fault || txEnabled || node.isInitialized(),
-                                               frameReceived);
+        const bool statusOn = statusLed.update(now, fault, frameReceived, txEnabled);
         GPIO_WriteBit(STATUS_GPIO_PORT, STATUS_GPIO_PIN, statusOn ? Bit_SET : Bit_RESET);
     }
 }

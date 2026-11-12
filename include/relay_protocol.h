@@ -131,6 +131,7 @@ struct NodeResult {
     bool error;
     bool reset;
     bool disableStatusLed;
+    bool enableTx;
 };
 
 class RelayNode {
@@ -146,7 +147,7 @@ public:
             if (!received.checksumValid) {
                 result.error = true;
             } else if (received.command == InitializeCommand) {
-                initialized = true;
+                result.enableTx = true;
             } else if (received.command == ResetCommand) {
                 result.reset = true;
             } else if (received.command == StatusLedOffCommand) {
@@ -161,12 +162,10 @@ public:
     void resetParser() { protocol.reset(); }
     void update(uint32_t now) { relay.update(now); }
     bool relayEnabled() const { return relay.isEnabled(); }
-    bool isInitialized() const { return initialized; }
 
 private:
     RelayProtocol protocol;
     RelayControl relay;
-    bool initialized = false;
 };
 
 class ResetAfterTransmit {

@@ -1,8 +1,8 @@
 # UART relay protocol
 
 USART1 uses PD6 for RX at 9600 baud, 8N1. TX on PD5 is enabled when a
-nonzero-address frame arrives and remains enabled. A local command does not
-enable TX or generate a frame.
+nonzero-address frame arrives or a valid local `init` command completes, and
+remains enabled until reset. Local commands do not generate or forward frames.
 
 The MCU runs at 8 MHz from the internal oscillator divided by three. UART and
 timer timings use the configured clock; measure power and verify communication
@@ -34,7 +34,7 @@ For example, `ff ff 00 00 00 00 00` turns every relay on.
 | `00` | Turn relay off |
 | `ff` | Turn relay on indefinitely |
 | `01` | Turn relay on for the parameter's number of milliseconds, then off |
-| `02` | Initialization command; leave the relay and timer unchanged |
+| `02` | Enable TX; leave the relay and timer unchanged |
 | `03` | Restart the device |
 | `04` | Disable the status LED until the device resets |
 
@@ -83,17 +83,18 @@ the chain to be connected to the serial adapter's RX pin and a common ground.
 
 Run the client tests on Linux with `python3 -m unittest discover -s test -p 'test_relayctl.py'`.
 
-The status LED normally blinks once per second and stays on after a valid local
-or broadcast initialization command, or once TX is enabled. These states remain
-latched until reset. Command `04` overrides all status LED indications,
+Before TX is enabled, the status LED alternates on and off every second. Once
+TX is enabled, the device is initialized and the LED flashes for 100 ms every
+two seconds. TX is enabled by any frame that must be forwarded, even before its
+checksum is received, or by a valid local `init` command.
+Command `04` overrides all status LED indications,
 including faults and received-frame flashes, until the device resets; it does
 not affect the relay or UART forwarding. After every complete received frame, including forwarded
 and invalid frames, the LED briefly switches to the opposite of its normal
 state for 40 ms. Frames received during that interval restart the interval.
 Incomplete frames and UART receive errors do not trigger this indication.
 It also stays on after an invalid local frame, unknown command, UART receive
-error, or transmit-buffer overflow, until reset; once TX is enabled, the LED
-cannot distinguish these faults. A receive error discards the affected byte and
+error, or transmit-buffer overflow, until reset. A receive error discards the affected byte and
 resets the frame parser.
 Because the protocol has no delimiter, length marker, or escape sequence, a
 lost or extra byte can leave the stream out of alignment; resetting the device

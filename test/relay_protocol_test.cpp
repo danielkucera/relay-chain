@@ -40,30 +40,55 @@ static void checkReset()
 static void checkStatusLed()
 {
     StatusLed led;
-    assert(!led.update(0, false, false));
-    assert(led.update(10, false, true));
-    assert(led.update(49, false, false));
-    assert(!led.update(50, false, false));
-    assert(led.update(1000, false, false));
-    assert(!led.update(1001, false, true));
-    assert(!led.update(1040, false, false));
-    assert(led.update(1041, false, false));
-    assert(!led.update(1200, true, true));
-    assert(!led.update(1250, true, true));
-    assert(!led.update(1289, true, false));
-    assert(led.update(1290, true, false));
-    assert(!led.update(UINT32_MAX - 50, true, true));
-    assert(!led.update(UINT32_MAX - 11, true, false));
-    assert(led.update(UINT32_MAX - 10, true, false));
-    assert(!led.update(UINT32_MAX - 10, true, true));
-    assert(!led.update(28, true, false));
-    assert(led.update(29, true, false));
+    assert(!led.update(0, false, false, false));
+    assert(led.update(10, false, true, false));
+    assert(led.update(49, false, false, false));
+    assert(!led.update(50, false, false, false));
+    assert(!led.update(999, false, false, false));
+    assert(led.update(1000, false, false, false));
+    assert(led.update(1999, false, false, false));
+    assert(!led.update(2000, false, false, false));
+
+    assert(led.update(2500, false, true, true));
+    assert(led.update(2539, false, false, true));
+    assert(!led.update(2540, false, false, true));
+    assert(!led.update(4499, false, false, true));
+    assert(led.update(4500, false, false, true));
+    assert(led.update(4599, false, false, true));
+    assert(!led.update(4600, false, false, true));
+    assert(led.update(6500, false, false, true));
+    assert(!led.update(6501, false, true, true));
+    assert(!led.update(6540, false, false, true));
+    assert(led.update(6541, false, false, true));
+    assert(!led.update(6600, false, false, true));
+
+    StatusLed fault;
+    assert(!fault.update(1200, true, true, true));
+    assert(!fault.update(1250, true, true, true));
+    assert(!fault.update(1289, true, false, true));
+    assert(fault.update(1290, true, false, true));
+    assert(!fault.update(UINT32_MAX - 50, true, true, true));
+    assert(!fault.update(UINT32_MAX - 11, true, false, true));
+    assert(fault.update(UINT32_MAX - 10, true, false, true));
+    assert(!fault.update(UINT32_MAX - 10, true, true, true));
+    assert(!fault.update(28, true, false, true));
+    assert(fault.update(29, true, false, true));
     led.disable();
-    assert(!led.update(30, true, true));
-    assert(!led.update(1000, true, false));
-    assert(!led.update(2000, false, true));
+    assert(!led.update(7000, true, true, true));
+    assert(!led.update(8000, true, false, true));
+    assert(!led.update(9000, false, true, true));
     StatusLed restarted;
-    assert(restarted.update(0, true, false));
+    assert(restarted.update(0, true, false, false));
+
+    StatusLed rollover;
+    assert(!rollover.update(UINT32_MAX - 2100, false, false, true));
+    assert(rollover.update(UINT32_MAX - 100, false, false, true));
+    assert(rollover.update(UINT32_MAX - 1, false, false, true));
+    assert(!rollover.update(UINT32_MAX, false, false, true));
+    assert(!rollover.update(1898, false, false, true));
+    assert(rollover.update(1899, false, false, true));
+    assert(rollover.update(1998, false, false, true));
+    assert(!rollover.update(1999, false, false, true));
 }
 
 static void checkStatusLedOffCommand()
@@ -93,11 +118,11 @@ static void checkStatusLedOffCommand()
                 led.disable();
             }
             if (frame == invalid || frame == forwarded) {
-                assert(led.update(100, true, false));
+                assert(led.update(100, true, false, false));
             } else if (frame == local && i == 6) {
-                assert(!led.update(100, true, true));
+                assert(!led.update(100, true, true, false));
             } else if (frame == broadcast) {
-                assert(!led.update(100, true, result.frameComplete));
+                assert(!led.update(100, true, result.frameComplete, false));
             }
         }
         assert(node.relayEnabled());
@@ -108,7 +133,7 @@ static void checkStatusLedOffCommand()
     }
     node.update(210);
     assert(!node.relayEnabled());
-    assert(!led.update(210, true, true));
+    assert(!led.update(210, true, true, false));
 }
 
 static void checkForwarding()
@@ -192,7 +217,7 @@ static NodeResult sendLocal(RelayNode& node, const uint8_t* frame, uint32_t now)
         assert(!result.forward);
         assert(result.frameComplete == (i + 1 == sizeof(InitializeFrame)));
         if (i + 1 < sizeof(InitializeFrame)) {
-            assert(!result.error);
+            assert(!result.error && !result.enableTx);
         }
     }
     return result;
@@ -201,14 +226,13 @@ static NodeResult sendLocal(RelayNode& node, const uint8_t* frame, uint32_t now)
 static void checkInitialization()
 {
     RelayNode first;
-    assert(!first.isInitialized());
     const uint8_t invalid[] = {0, 0xff, 0, 0, 0, 0, 0};
     NodeResult result = sendLocal(first, invalid, 0);
-    assert(result.error && !first.relayEnabled() && !first.isInitialized());
+    assert(result.error && !first.relayEnabled() && !result.enableTx);
 
     const uint8_t invalidInit[] = {0, InitializeCommand, 0, 0, 0, 0, 0};
     result = sendLocal(first, invalidInit, 0);
-    assert(result.error && !first.isInitialized());
+    assert(result.error && !result.enableTx);
 
     const uint8_t unknown[] = {0, 5, 0, 0, 0, 0, 5};
     result = sendLocal(first, unknown, 0);
@@ -222,29 +246,61 @@ static void checkInitialization()
 
     const uint8_t on[] = {0, 0xff, 0, 0, 0, 0, 0xff};
     result = sendLocal(first, on, 0);
-    assert(!result.forward && !result.error && first.relayEnabled() && !first.isInitialized());
+    assert(!result.forward && !result.error && !result.enableTx && first.relayEnabled());
     result = sendLocal(first, InitializeFrame, 1);
-    assert(!result.forward && !result.error && first.relayEnabled() && first.isInitialized());
+    assert(!result.forward && !result.error && result.enableTx && first.relayEnabled());
     first.resetParser();
     result = sendLocal(first, unknown, 2);
-    assert(result.error && first.isInitialized());
+    assert(result.error && !result.enableTx);
 
     RelayNode chain[8];
     for (RelayNode& node : chain) {
         result = sendLocal(node, InitializeFrame, 0);
-        assert(!result.forward && !result.error && !node.relayEnabled());
+        assert(!result.forward && !result.error && result.enableTx && !node.relayEnabled());
         result = sendLocal(node, InitializeFrame, 1);
-        assert(!result.forward && !result.error && !node.relayEnabled());
+        assert(!result.forward && !result.error && result.enableTx && !node.relayEnabled());
     }
 
     RelayNode timed;
     const uint8_t timedOn[] = {0, 1, 0, 0, 0, 10, 11};
     result = sendLocal(timed, timedOn, 10);
-    assert(!result.forward && !result.error && timed.relayEnabled());
+    assert(!result.forward && !result.error && !result.enableTx && timed.relayEnabled());
     result = sendLocal(timed, InitializeFrame, 15);
-    assert(!result.forward && !result.error && timed.relayEnabled());
+    assert(!result.forward && !result.error && result.enableTx && timed.relayEnabled());
     timed.update(20);
     assert(!timed.relayEnabled());
+}
+
+static void checkTxEnabledStatus()
+{
+    const uint8_t frames[][7] = {
+        {1, 0xff, 0, 0, 0, 0, 0xfe},
+        {0xff, 0xff, 0, 0, 0, 0, 0},
+        {0, InitializeCommand, 0, 0, 0, 0, InitializeCommand},
+    };
+    for (unsigned frameIndex = 0; frameIndex < 3; ++frameIndex) {
+        RelayNode node;
+        StatusLed led;
+        bool txEnabled = false;
+        for (unsigned i = 0; i < 7; ++i) {
+            const NodeResult result = node.receive(frames[frameIndex][i], 100);
+            if (result.forward || result.enableTx) {
+                txEnabled = true;
+            }
+            assert(txEnabled == (frameIndex < 2 || i == 6));
+            led.update(100, false, result.frameComplete, txEnabled);
+        }
+        assert(!led.update(2099, false, false, txEnabled));
+        assert(led.update(2100, false, false, txEnabled));
+        assert(!led.update(2200, false, false, txEnabled));
+    }
+
+    RelayNode node;
+    const uint8_t invalid[] = {0, InitializeCommand, 0, 0, 0, 0, 0};
+    for (uint8_t byte : invalid) {
+        const NodeResult result = node.receive(byte, 0);
+        assert(!result.forward && !result.enableTx);
+    }
 }
 
 static void checkBroadcast()
@@ -257,10 +313,10 @@ static void checkBroadcast()
             const NodeResult result = node.receive(byte, 0);
             assert(result.forward && result.forwardByte == byte && !result.error);
             assert(result.frameComplete == (i + 1 == sizeof(initialize)));
+            assert(result.enableTx == (i + 1 == sizeof(initialize)));
             assert(!node.relayEnabled());
             byte = result.forwardByte;
         }
-        assert(node.isInitialized());
     }
 
     const uint8_t on[] = {0xff, 0xff, 0, 0, 0, 0, 0};
@@ -295,7 +351,7 @@ static void checkBroadcast()
         node.update(110);
         assert(!node.relayEnabled());
         NodeResult result = sendLocal(node, InitializeFrame, 111);
-        assert(!result.forward && !result.error);
+        assert(!result.forward && !result.error && result.enableTx);
     }
 }
 
@@ -306,6 +362,7 @@ int main()
     checkReset();
     checkForwarding();
     checkInitialization();
+    checkTxEnabledStatus();
     checkBroadcast();
     for (unsigned address = 0; address < BroadcastAddress; ++address) {
         checkDaisyChain(static_cast<uint8_t>(address), false);
