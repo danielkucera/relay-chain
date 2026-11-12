@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send commands to a daisy chain of UART relay units."""
+"""Send a UART relay command, then display received bytes until Ctrl+C."""
 
 import argparse
 import sys
@@ -49,9 +49,13 @@ def main(argv=None):
     timed.add_argument("milliseconds", type=duration_value)
     commands.add_parser("init", help="initialize the selected device(s)")
     commands.add_parser("reset", help="restart the selected device(s)")
+    commands.add_parser("led-off", help="disable status LED until reset")
     args = parser.parse_args(argv)
 
-    commands_by_name = {"on": 0xff, "off": 0x00, "on-for": 0x01, "init": 0x02, "reset": 0x03}
+    commands_by_name = {
+        "on": 0xff, "off": 0x00, "on-for": 0x01, "init": 0x02,
+        "reset": 0x03, "led-off": 0x04,
+    }
     duration = args.milliseconds if args.action == "on-for" else 0
     frame = make_frame(args.address, commands_by_name[args.action], duration)
 
@@ -72,13 +76,17 @@ def main(argv=None):
             if written != len(frame):
                 raise serial.SerialException(f"only {written} of {len(frame)} bytes written")
             uart.flush()
+            print(f"Sent: {frame.hex(' ')}", flush=True)
+            print("Listening for received bytes (Ctrl+C to stop)...", flush=True)
+            while True:
+                received = uart.read(1)
+                print(f"Received: {received.hex(' ')}", flush=True)
+    except KeyboardInterrupt:
+        print("\nStopped listening.")
+        return 0
     except (serial.SerialException, OSError) as exc:
-        print(f"Error sending command on {args.port}: {exc}", file=sys.stderr)
+        print(f"Serial error on {args.port}: {exc}", file=sys.stderr)
         return 1
-
-    print(f"Sent: {frame.hex(' ')}")
-    return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

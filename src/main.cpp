@@ -136,6 +136,9 @@ int main(void)
             if (result.error) {
                 fault = true;
             }
+            if (result.disableStatusLed) {
+                statusLed.disable();
+            }
             if (result.reset && !forwardingFailed) {
                 reset.request();
             }

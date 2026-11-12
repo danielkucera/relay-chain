@@ -4,6 +4,7 @@
 
 constexpr uint8_t InitializeCommand = 0x02;
 constexpr uint8_t ResetCommand = 0x03;
+constexpr uint8_t StatusLedOffCommand = 0x04;
 constexpr uint8_t BroadcastAddress = 0xff;
 
 struct ProtocolResult {
@@ -129,6 +130,7 @@ struct NodeResult {
     bool frameComplete;
     bool error;
     bool reset;
+    bool disableStatusLed;
 };
 
 class RelayNode {
@@ -147,6 +149,8 @@ public:
                 initialized = true;
             } else if (received.command == ResetCommand) {
                 result.reset = true;
+            } else if (received.command == StatusLedOffCommand) {
+                result.disableStatusLed = true;
             } else if (!relay.command(received.command, received.parameter, now)) {
                 result.error = true;
             }

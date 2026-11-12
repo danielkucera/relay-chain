@@ -32,6 +32,7 @@ For example, `ff ff 00 00 00 00 00` turns every relay on.
 | `01` | Turn relay on for the parameter's number of milliseconds, then off |
 | `02` | Initialization command; leave the relay and timer unchanged |
 | `03` | Restart the device |
+| `04` | Disable the status LED until the device resets |
 
 A timed command restarts the timer; a zero duration turns the relay off
 immediately. A subsequent on or off command cancels the timer. Unknown commands
@@ -58,6 +59,7 @@ install your distribution's `python3-serial` package). The client uses
 ```sh
 python3 relayctl.py ff init
 python3 relayctl.py ff reset
+python3 relayctl.py ff led-off
 python3 relayctl.py 0 on
 python3 relayctl.py 1 off
 python3 relayctl.py 02 on-for 5000
@@ -71,14 +73,19 @@ through `0xfe`; broadcast is `ff`, `0xff`, `255`, or `broadcast`.
 A zero duration turns the relay off immediately,
 and the maximum duration is 4294967295 ms. The printed frame confirms only
 that it was written to the serial port: the protocol has no acknowledgment.
+After sending, the client stays open and prints received bytes in hexadecimal
+until you press Ctrl+C. Receiving the forwarded frame requires the far end of
+the chain to be connected to the serial adapter's RX pin and a common ground.
 
 Run the client tests on Linux with `python3 -m unittest discover -s test -p 'test_relayctl.py'`.
 
 The status LED normally blinks once per second and stays on after a valid local
 or broadcast initialization command, or once TX is enabled. These states remain
-latched until reset. After every complete received frame, including forwarded
+latched until reset. Command `04` overrides all status LED indications,
+including faults and received-frame flashes, until the device resets; it does
+not affect the relay or UART forwarding. After every complete received frame, including forwarded
 and invalid frames, the LED briefly switches to the opposite of its normal
-state for 100 ms. Frames received during that interval restart the interval.
+state for 40 ms. Frames received during that interval restart the interval.
 Incomplete frames and UART receive errors do not trigger this indication.
 It also stays on after an invalid local frame, unknown command, UART receive
 error, or transmit-buffer overflow, until reset; once TX is enabled, the LED

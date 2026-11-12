@@ -4,8 +4,13 @@
 
 class StatusLed {
 public:
+    void disable() { disabled = true; }
+
     bool update(uint32_t now, bool steadyOn, bool frameReceived)
     {
+        if (disabled) {
+            return false;
+        }
         if (!steadyOn && static_cast<uint32_t>(now - lastBlink) >= 1000) {
             lastBlink = now;
             heartbeatOn = !heartbeatOn;
@@ -29,4 +34,5 @@ private:
     bool heartbeatOn = false;
     bool pulseOn = false;
     bool pulseActive = false;
+    bool disabled = false;
 };
