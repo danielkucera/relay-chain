@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send a UART relay command, then display received bytes until Ctrl+C."""
+"""Send a UART relay command and optionally display received bytes."""
 
 import argparse
 import sys
@@ -38,6 +38,8 @@ def make_frame(address, command, parameter=0):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", default="/dev/ttyACM0", help="serial port (default: %(default)s)")
+    parser.add_argument("--listen", action="store_true",
+                        help="display received bytes until Ctrl+C after sending")
     parser.add_argument(
         "address", type=address_value,
         help="zero-based device address (0-254 or 0x00-0xfe); ff (0xff, 255, or broadcast) targets all devices",
@@ -77,10 +79,11 @@ def main(argv=None):
                 raise serial.SerialException(f"only {written} of {len(frame)} bytes written")
             uart.flush()
             print(f"Sent: {frame.hex(' ')}", flush=True)
-            print("Listening for received bytes (Ctrl+C to stop)...", flush=True)
-            while True:
-                received = uart.read(1)
-                print(f"Received: {received.hex(' ')}", flush=True)
+            if args.listen:
+                print("Listening for received bytes (Ctrl+C to stop)...", flush=True)
+                while True:
+                    received = uart.read(1)
+                    print(f"Received: {received.hex(' ')}", flush=True)
     except KeyboardInterrupt:
         print("\nStopped listening.")
         return 0

@@ -21,14 +21,27 @@ class RelayCliTests(unittest.TestCase):
 
     def assert_frame(self, expected, *args):
         master, slave = pty.openpty()
+        try:
+            result = self.run_cli("--port", os.ttyname(slave), *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(select.select([master], [], [], 5)[0])
+            self.assertEqual(os.read(master, 100), bytes.fromhex(expected))
+            self.assertIn("Sent:", result.stdout)
+            self.assertNotIn("Listening", result.stdout)
+        finally:
+            os.close(slave)
+            os.close(master)
+
+    def test_listen(self):
+        master, slave = pty.openpty()
         process = None
         try:
             process = subprocess.Popen(
-                [sys.executable, str(SCRIPT), "--port", os.ttyname(slave), *args],
+                [sys.executable, str(SCRIPT), "--port", os.ttyname(slave), "--listen", "ff", "init"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             self.assertTrue(select.select([master], [], [], 5)[0])
-            self.assertEqual(os.read(master, 100), bytes.fromhex(expected))
+            self.assertEqual(os.read(master, 100), bytes.fromhex("ff 02 00 00 00 00 fd"))
             os.write(master, bytes.fromhex("00 80 ff"))
             output = b""
             deadline = time.monotonic() + 5

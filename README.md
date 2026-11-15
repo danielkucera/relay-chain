@@ -69,6 +69,7 @@ python3 relayctl.py 1 off
 python3 relayctl.py 02 on-for 5000
 python3 relayctl.py broadcast off
 python3 relayctl.py --port /dev/ttyUSB0 broadcast init
+python3 relayctl.py --listen ff init
 ```
 
 Every command requires an address before the command. Device addresses are
@@ -77,9 +78,10 @@ through `0xfe`; broadcast is `ff`, `0xff`, `255`, or `broadcast`.
 A zero duration turns the relay off immediately,
 and the maximum duration is 4294967295 ms. The printed frame confirms only
 that it was written to the serial port: the protocol has no acknowledgment.
-After sending, the client stays open and prints received bytes in hexadecimal
-until you press Ctrl+C. Receiving the forwarded frame requires the far end of
-the chain to be connected to the serial adapter's RX pin and a common ground.
+By default the client exits after sending. With `--listen` before the address,
+it stays open and prints received bytes in hexadecimal until you press Ctrl+C.
+Receiving the forwarded frame requires the far end of the chain to be connected
+to the serial adapter's RX pin and a common ground.
 
 Run the client tests on Linux with `python3 -m unittest discover -s test -p 'test_relayctl.py'`.
 
