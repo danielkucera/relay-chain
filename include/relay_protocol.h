@@ -5,6 +5,7 @@
 constexpr uint8_t InitializeCommand = 0x02;
 constexpr uint8_t ResetCommand = 0x03;
 constexpr uint8_t StatusLedOffCommand = 0x04;
+constexpr uint8_t ReadCommand = 0x05;
 constexpr uint8_t NoRecipientAddress = 0xfe;
 constexpr uint8_t BroadcastAddress = 0xff;
 constexpr uint8_t NoExecution = 0xff;
@@ -49,6 +50,7 @@ public:
     }
 
     bool isEnabled() const { return enabled; }
+    uint32_t status() const { return timed ? remaining : (enabled ? UINT32_MAX : 0); }
 
 private:
     bool enabled = false;
@@ -88,8 +90,16 @@ public:
             commandXor ^= byte;
             if (position == 1) {
                 command = byte;
+                if (addressed && command == ReadCommand) {
+                    relay.update(now);
+                    readValue = relay.status();
+                }
             } else {
                 parameter = (parameter << 8) | byte;
+                if (addressed && command == ReadCommand) {
+                    result.forwardByte = static_cast<uint8_t>(readValue >> ((5 - position) * 8));
+                    adjustment ^= byte ^ result.forwardByte;
+                }
             }
         } else if (position == 6) {
             if (commandXor != byte) {
@@ -107,6 +117,8 @@ public:
                         executed = true;
                     } else if (command == StatusLedOffCommand) {
                         result.disableStatusLed = true;
+                        executed = true;
+                    } else if (command == ReadCommand) {
                         executed = true;
                     } else {
                         executed = relay.command(command, parameter, now);
@@ -170,6 +182,7 @@ private:
 
     RelayControl relay;
     uint32_t parameter = 0;
+    uint32_t readValue = 0;
     uint8_t position = 0;
     uint8_t command = 0;
     uint8_t commandXor = 0;

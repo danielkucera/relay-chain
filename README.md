@@ -48,7 +48,8 @@ devices do not execute the command. The master may also send directly to
 `fe`, for example to check forwarding without executing anything. Address
 `ff` is broadcast and is forwarded unchanged; every device executes a
 supported broadcast command. Each device adjusts byte 6 for its address
-change; the command and parameters are forwarded unchanged.
+change; the command and parameters are forwarded unchanged except for the
+parameter of a read command, as described below.
 
 For example, the master can send broadcast init:
 
@@ -71,6 +72,33 @@ when the addressed device does not recognize the command.
 | `02` | Initialize; leave the relay and timer unchanged |
 | `03` | Restart the device |
 | `04` | Disable the status LED until the device resets |
+| `05` | Read relay status into the parameter |
+
+For `05`, the master sends a zero parameter. The addressed device takes a
+snapshot when it receives the command byte, and replaces the four parameter
+bytes as they are forwarded, in big-endian order:
+
+| Returned parameter | Relay status |
+| --- | --- |
+| `00000000` | Off |
+| `ffffffff` | On indefinitely, or timed with 4294967295 ms remaining |
+| `00000001`-`fffffffe` | On with that many milliseconds remaining |
+
+The maximum timed duration is also `ffffffff` ms, so a snapshot at exactly
+that remaining duration is indistinguishable from on indefinitely. A
+successful read is counted once per addressed device. For broadcast, every
+device overwrites the argument with its own snapshot; the returned parameter
+therefore contains only the **last device's** status, not all statuses.
+If the count is zero, the parameter is not a read result. A read sent to
+`fe` is forwarded unchanged and does not address any device.
+
+To keep byte-by-byte forwarding, the device emits the snapshot **before**
+receiving and validating the command XOR, and adjusts the forwarded command
+XOR for the changed parameter. If the incoming XOR fails, it stops forwarding
+and resets as usual; the earlier parameter bytes cannot be retracted. Only
+interpret a read result from a complete, validated returned frame with an
+execution count of one for unicast or a nonzero count for broadcast. The
+read itself does not change the relay or timer.
 
 A timed command restarts the timer; a zero duration turns the relay off
 immediately. A subsequent on or off command cancels the timer. Initialization
@@ -132,6 +160,8 @@ python3 relayctl.py ff led-off
 python3 relayctl.py 0 on
 python3 relayctl.py 1 off
 python3 relayctl.py 02 on-for 5000
+python3 relayctl.py --listen 1 read
+python3 relayctl.py --listen ff read
 python3 relayctl.py fe init
 python3 relayctl.py broadcast off
 python3 relayctl.py --port /dev/ttyUSB0 broadcast init
@@ -153,7 +183,10 @@ concurrent writers. A serial driver's flush or a buffered USB adapter may not
 guarantee the final stop bit has physically left the wire, so verify timing
 on the hardware. With `--listen` before the address, it waits up
 to two seconds for a returned frame, validates its XORs and command fields,
-then prints the execution count and distance. It exits with an error on timeout
+then prints the execution count and distance. For a successful `read`, it also
+prints the relay status; for broadcast this is the last device's status.
+Without `--listen`, no read result is shown. The client rejects the `fe`
+read address. It exits with an error on timeout
 or invalid feedback. A returned frame requires the last device's TX to be wired
 to the master's RX. There is no sequence number, so stale matching feedback
 cannot be distinguished from the current response.

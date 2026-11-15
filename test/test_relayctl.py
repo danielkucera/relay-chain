@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import os
 from pathlib import Path
 import pty
@@ -145,6 +146,100 @@ class RelayCliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             relayctl.parse_feedback(wrong_command, on)
 
+    def test_read_feedback(self):
+        sent = relayctl.make_frame(1, relayctl.READ_COMMAND)
+        for value in (0, 0xffffffff, 123456):
+            with self.subTest(value=value):
+                response = bytearray(relayctl.make_frame(0xfe, relayctl.READ_COMMAND, value))
+                response[7:10] = bytes((1, 1, 0))
+                self.assertEqual(relayctl.parse_feedback(response, sent), (1, 1))
+        missing = bytearray(relayctl.make_frame(0, relayctl.READ_COMMAND))
+        self.assertEqual(relayctl.parse_feedback(missing, sent), (0, 0xff))
+        missing[2] = 1
+        missing[6] ^= 1
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            relayctl.parse_feedback(missing, sent)
+
+    def test_broadcast_read_feedback(self):
+        sent = relayctl.make_frame(0xff, relayctl.READ_COMMAND)
+        for value in (0, 0xffffffff, 123456):
+            with self.subTest(value=value):
+                response = bytearray(relayctl.make_frame(0xff, relayctl.READ_COMMAND, value))
+                response[7:10] = bytes((3, 0, 3))
+                self.assertEqual(relayctl.parse_feedback(response, sent), (3, 0))
+        wrong_command = bytearray(relayctl.make_frame(0xff, 0x04, 123))
+        wrong_command[7:10] = bytes((3, 0, 3))
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            relayctl.parse_feedback(wrong_command, sent)
+        corrupt = bytearray(relayctl.make_frame(0xff, relayctl.READ_COMMAND, 123))
+        corrupt[7:10] = bytes((3, 0, 3))
+        corrupt[6] ^= 1
+        with self.assertRaisesRegex(ValueError, "invalid command XOR"):
+            relayctl.parse_feedback(corrupt, sent)
+
+    def test_read_status_output(self):
+        serial = mock.MagicMock()
+        uart = serial.Serial.return_value.__enter__.return_value
+        uart.write.side_effect = len
+        for value, expected in (
+            (0, "Relay: off"),
+            (0xffffffff, "Relay: on indefinitely"),
+            (123, "Relay: on; 123 ms remaining"),
+        ):
+            with self.subTest(value=value):
+                response = bytearray(relayctl.make_frame(0xfe, relayctl.READ_COMMAND, value))
+                response[7:10] = bytes((1, 0, 1))
+                uart.read.return_value = bytes(response)
+                output = io.StringIO()
+                with mock.patch.dict(sys.modules, {"serial": serial}), \
+                        mock.patch("sys.stdout", output):
+                    self.assertIsNone(relayctl.main(["--listen", "0", "read"]))
+                self.assertIn(expected, output.getvalue())
+
+    def test_listen_read(self):
+        master, slave = pty.openpty()
+        process = None
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "--port", os.ttyname(slave), "--listen", "1", "read"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertTrue(select.select([master], [], [], 5)[0])
+            self.assertEqual(os.read(master, 100), bytes.fromhex("01 05 00 00 00 00 04 00 ff ff"))
+            os.write(master, bytes.fromhex("fe 05 00 00 03 ce 36 01 01 00"))
+            output, error = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertIn(b"Relay: on; 974 ms remaining", output)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            os.close(slave)
+            os.close(master)
+
+    def test_listen_broadcast_read(self):
+        master, slave = pty.openpty()
+        process = None
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "--port", os.ttyname(slave), "--listen", "ff", "read"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertTrue(select.select([master], [], [], 5)[0])
+            self.assertEqual(os.read(master, 100), bytes.fromhex("ff 05 00 00 00 00 fa 00 ff ff"))
+            os.write(master, bytes.fromhex("ff 05 00 00 03 ce 37 03 00 03"))
+            output, error = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertIn(b"Executed: 3; devices after last executor: 0", output)
+            self.assertIn(b"Status from last device:", output)
+            self.assertIn(b"Relay: on; 974 ms remaining", output)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            os.close(slave)
+            os.close(master)
+
     def test_commands(self):
         for address in ("ff", "FF", "0xff", "255", "broadcast"):
             with self.subTest(address=address):
@@ -166,6 +261,8 @@ class RelayCliTests(unittest.TestCase):
         self.assert_frame("ff 01 12 34 56 78 f6", "broadcast", "on-for", "305419896")
         self.assert_frame("01 01 ff ff ff ff 00", "1", "on-for", "4294967295")
         self.assert_frame("00 01 00 00 00 00 01", "0", "on-for", "0")
+        self.assert_frame("01 05 00 00 00 00 04", "1", "read")
+        self.assert_frame("ff 05 00 00 00 00 fa", "ff", "read")
 
     def test_invalid_inputs(self):
         for args in (
@@ -180,6 +277,7 @@ class RelayCliTests(unittest.TestCase):
             ("broadcast", "on-for", "-1"),
             ("0", "on-for", "4294967296"),
             ("0", "on-for", "x"),
+            ("fe", "read"),
         ):
             with self.subTest(args=args):
                 result = self.run_cli(*args)

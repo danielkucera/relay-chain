@@ -6,6 +6,7 @@ import sys
 import time
 
 INTER_FRAME_GAP_SECONDS = 0.005
+READ_COMMAND = 0x05
 
 
 def xor_bytes(data):
@@ -54,10 +55,13 @@ def parse_feedback(frame, sent):
     count, distance = frame[7:9]
     if count == 0xff or (count == 0) != (distance == 0xff):
         raise ValueError("invalid status fields")
-    if frame[2:6] != sent[2:6]:
+    is_read_result = (sent[1] == READ_COMMAND and
+                      ((sent[0] < 0xfe and count == 1) or
+                       (sent[0] == 0xff and count > 0)))
+    if not is_read_result and frame[2:6] != sent[2:6]:
         raise ValueError("response does not match the command")
     if sent[0] == 0xff:
-        matches = frame[:7] == sent[:7] and count > 0
+        matches = (frame[0] == sent[0] and frame[1] == sent[1] and count > 0)
     elif sent[0] == 0xfe:
         matches = frame[:7] == sent[:7] and count == 0
     else:
@@ -86,11 +90,15 @@ def main(argv=None):
     commands.add_parser("init", help="initialize the selected device(s)")
     commands.add_parser("reset", help="restart the selected device(s)")
     commands.add_parser("led-off", help="disable status LED until reset")
+    commands.add_parser("read", help="read relay status; broadcast returns the last device's status")
     args = parser.parse_args(argv)
+    if args.action == "read" and args.address == 0xfe:
+        parser.error("read requires a unicast or broadcast address")
 
     commands_by_name = {
         "on": 0xff, "off": 0x00, "on-for": 0x01, "init": 0x02,
         "reset": 0x03, "led-off": 0x04,
+        "read": READ_COMMAND,
     }
     duration = args.milliseconds if args.action == "on-for" else 0
     frame = make_frame(args.address, commands_by_name[args.action], duration)
@@ -135,6 +143,16 @@ def main(argv=None):
                     return 1
                 if count:
                     print(f"Executed: {count}; devices after last executor: {distance}")
+                    if args.action == "read":
+                        value = int.from_bytes(received[2:6], "big")
+                        if args.address == 0xff:
+                            print("Status from last device:")
+                        if value == 0:
+                            print("Relay: off")
+                        elif value == 0xffffffff:
+                            print("Relay: on indefinitely (or timed with 4294967295 ms remaining)")
+                        else:
+                            print(f"Relay: on; {value} ms remaining")
                 else:
                     print("Executed: 0; no device executed the command")
     except KeyboardInterrupt:

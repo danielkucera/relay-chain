@@ -170,7 +170,7 @@ static void checkNoRecipientAddress()
     RelayNode nodes[3];
     for (uint8_t command : {uint8_t(0), uint8_t(0xff), uint8_t(1),
                             InitializeCommand, ResetCommand, StatusLedOffCommand,
-                            uint8_t(0x05), uint8_t(0x7f)}) {
+                            ReadCommand, uint8_t(0x7f)}) {
         Bytes input = frame(NoRecipientAddress, command, 123);
         for (RelayNode& node : nodes) {
             bool error = false;
@@ -183,13 +183,13 @@ static void checkNoRecipientAddress()
         }
     }
 
-    Bytes unknown = frame(1, 0x05, 123);
+    Bytes unknown = frame(1, 0x06, 123);
     bool error = false;
     Bytes first = send(nodes[0], unknown, &error);
-    assert(!error && first[0] == 0 && first[1] == 0x05);
+    assert(!error && first[0] == 0 && first[1] == 0x06);
     Bytes second = send(nodes[1], first, &error);
-    assert(error && second[0] == NoRecipientAddress && second[1] == 0x05);
-    assert(second[6] == (NoRecipientAddress ^ 0x05 ^ 123));
+    assert(error && second[0] == NoRecipientAddress && second[1] == 0x06);
+    assert(second[6] == (NoRecipientAddress ^ 0x06 ^ 123));
     error = false;
     Bytes third = send(nodes[2], second, &error);
     assert(!error && third == second && third[7] == 0 && third[8] == 0xff);
@@ -199,6 +199,91 @@ static void checkNoRecipientAddress()
     unsigned resets = 0;
     assert(send(nodes[0], invalid, &error, &resets).size() == 6);
     assert(error && resets == 1 && !nodes[0].relayEnabled());
+}
+
+static void checkRead()
+{
+    RelayNode nodes[3];
+    Bytes output = chain(nodes, 3, frame(1, ReadCommand, 0x12345678));
+    assert((output == Bytes{0xfe, 5, 0, 0, 0, 0, 0xfb, 1, 1, 0}));
+    chain(nodes, 3, frame(1, 0xff));
+    output = chain(nodes, 3, frame(1, ReadCommand));
+    assert((output == Bytes{0xfe, 5, 0xff, 0xff, 0xff, 0xff, 0xfb, 1, 1, 0}));
+
+    RelayNode timed;
+    Bytes duration = frame(0, 1, 1000);
+    for (uint8_t byte : duration) timed.receive(byte, 100);
+    Bytes input = frame(0, ReadCommand, 0x12345678);
+    Bytes response;
+    for (unsigned i = 0; i < input.size(); ++i) {
+        NodeResult result = timed.receive(input[i], 125 + i);
+        assert(result.forward && !result.error);
+        response.push_back(result.forwardByte);
+        if (i == 1) timed.update(1100);
+    }
+    // The returned value is a single snapshot, even if the timer expires mid-frame.
+    assert((response == Bytes{0xfe, 5, 0, 0, 3, 0xce, 0x36, 1, 0, 1}));
+    assert(!timed.relayEnabled());
+    output = send(timed, frame(0, ReadCommand));
+    assert((output == Bytes{0xfe, 5, 0, 0, 0, 0, 0xfb, 1, 0, 1}));
+
+    RelayNode rollover;
+    for (uint8_t byte : duration) rollover.receive(byte, UINT32_MAX - 100);
+    Bytes partial;
+    input = frame(0, ReadCommand);
+    for (unsigned i = 0; i < input.size(); ++i) {
+        NodeResult result = rollover.receive(input[i], 99);
+        assert(result.forward && !result.error);
+        partial.push_back(result.forwardByte);
+    }
+    assert((partial == Bytes{0xfe, 5, 0, 0, 3, 0x20, 0xd8, 1, 0, 1}));
+
+    RelayNode expired;
+    for (uint8_t byte : duration) expired.receive(byte, 100);
+    input = frame(0, ReadCommand);
+    output.clear();
+    for (uint8_t byte : input) {
+        const NodeResult result = expired.receive(byte, 1100);
+        assert(result.forward && !result.error);
+        output.push_back(result.forwardByte);
+    }
+    assert((output == Bytes{0xfe, 5, 0, 0, 0, 0, 0xfb, 1, 0, 1}));
+    assert(!expired.relayEnabled());
+
+    RelayNode invalid;
+    send(invalid, frame(0, 0xff));
+    input = frame(0, ReadCommand);
+    input[6] ^= 1;
+    bool error = false;
+    unsigned resets = 0;
+    output = send(invalid, input, &error, &resets);
+    assert(error && resets == 1 && output.size() == 6);
+    assert(output[2] == 0xff && output[5] == 0xff && invalid.relayEnabled());
+
+    RelayNode broadcast[3];
+    send(broadcast[0], frame(0, 0xff));
+    send(broadcast[1], frame(0, 1, 123));
+    Bytes broadcastInput = frame(0xff, ReadCommand, 0x12345678);
+    error = false;
+    output = send(broadcast[0], broadcastInput, &error);
+    assert(!error && (output == Bytes{0xff, 5, 0xff, 0xff, 0xff, 0xff, 0xfa, 1, 0, 1}));
+    output = send(broadcast[1], output, &error);
+    assert(!error && (output == Bytes{0xff, 5, 0, 0, 0, 123, 0x81, 2, 0, 2}));
+    output = send(broadcast[2], output, &error);
+    assert(!error && (output == Bytes{0xff, 5, 0, 0, 0, 0, 0xfa, 3, 0, 3}));
+    assert(broadcast[0].relayEnabled() && broadcast[1].relayEnabled() &&
+           !broadcast[2].relayEnabled());
+
+    broadcastInput[6] ^= 1;
+    resets = 0;
+    error = false;
+    output = send(broadcast[0], broadcastInput, &error, &resets);
+    assert(error && resets == 1 && output.size() == 6);
+    assert(output[2] == 0xff && output[5] == 0xff);
+    output = chain(nodes, 3, frame(NoRecipientAddress, ReadCommand, 0x12345678));
+    assert(output == frame(NoRecipientAddress, ReadCommand, 0x12345678));
+    output = chain(nodes, 3, frame(3, ReadCommand, 0x12345678));
+    assert(output[0] == 0 && output[2] == 0x12 && output[5] == 0x78 && output[7] == 0);
 }
 
 static void checkResetAndTimeout()
@@ -305,6 +390,7 @@ int main()
     checkErrors();
     checkStreaming();
     checkNoRecipientAddress();
+    checkRead();
     checkResetAndTimeout();
     checkLedAndRelay();
 }
