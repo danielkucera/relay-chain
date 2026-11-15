@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
-"""Send a UART relay command and optionally display received bytes."""
+"""Send a UART relay command and optionally wait for chain feedback."""
 
 import argparse
 import sys
+import time
+
+INTER_FRAME_GAP_SECONDS = 0.005
+
+
+def xor_bytes(data):
+    checksum = 0
+    for byte in data:
+        checksum ^= byte
+    return checksum
 
 
 def address_value(value):
     if value.lower() in ("broadcast", "ff"):
         return 0xff
+    if value.lower() in ("none", "fe"):
+        return 0xfe
     try:
         address = int(value, 16 if value.lower().startswith("0x") else 10)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("use 0-254 or ff (broadcast)") from exc
+        raise argparse.ArgumentTypeError("use 0-253, fe (none), or ff (broadcast)") from exc
     if not 0 <= address <= 255:
-        raise argparse.ArgumentTypeError("use 0-254 or ff (broadcast)")
+        raise argparse.ArgumentTypeError("use 0-253, fe (none), or ff (broadcast)")
     return address
 
 
@@ -29,20 +41,42 @@ def duration_value(value):
 
 def make_frame(address, command, parameter=0):
     frame = bytes((address, command)) + parameter.to_bytes(4, "big")
-    checksum = 0
-    for byte in frame:
-        checksum ^= byte
-    return frame + bytes((checksum,))
+    return frame + bytes((xor_bytes(frame), 0, 0xff, 0xff))
+
+
+def parse_feedback(frame, sent):
+    if len(frame) != 10:
+        raise ValueError(f"incomplete response ({len(frame)} of 10 bytes)")
+    if xor_bytes(frame[:7]) != 0:
+        raise ValueError("invalid command XOR")
+    if xor_bytes(frame[7:]) != 0:
+        raise ValueError("invalid status XOR")
+    count, distance = frame[7:9]
+    if count == 0xff or (count == 0) != (distance == 0xff):
+        raise ValueError("invalid status fields")
+    if frame[2:6] != sent[2:6]:
+        raise ValueError("response does not match the command")
+    if sent[0] == 0xff:
+        matches = frame[:7] == sent[:7] and count > 0
+    elif sent[0] == 0xfe:
+        matches = frame[:7] == sent[:7] and count == 0
+    else:
+        matches = (frame[1] == sent[1] and
+                   ((frame[0] == 0xfe and count <= 1) or
+                    (count == 0 and frame[0] < sent[0])))
+    if not matches:
+        raise ValueError("response does not match the command")
+    return count, distance
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", default="/dev/ttyACM0", help="serial port (default: %(default)s)")
     parser.add_argument("--listen", action="store_true",
-                        help="display received bytes until Ctrl+C after sending")
+                        help="wait up to 2 seconds for the returned frame and display feedback")
     parser.add_argument(
         "address", type=address_value,
-        help="zero-based device address (0-254 or 0x00-0xfe); ff (0xff, 255, or broadcast) targets all devices",
+        help="device 0-253 (0x00-0xfd); fe (0xfe, 254, or none) targets none; ff targets all",
     )
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("on", help="turn relay on indefinitely")
@@ -78,12 +112,31 @@ def main(argv=None):
             if written != len(frame):
                 raise serial.SerialException(f"only {written} of {len(frame)} bytes written")
             uart.flush()
+            if not args.listen:
+                time.sleep(INTER_FRAME_GAP_SECONDS)
             print(f"Sent: {frame.hex(' ')}", flush=True)
             if args.listen:
-                print("Listening for received bytes (Ctrl+C to stop)...", flush=True)
-                while True:
-                    received = uart.read(1)
-                    print(f"Received: {received.hex(' ')}", flush=True)
+                deadline = time.monotonic() + 2
+                received = bytearray()
+                while len(received) < 10:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    uart.timeout = remaining
+                    chunk = uart.read(10 - len(received))
+                    if not chunk:
+                        break
+                    received.extend(chunk)
+                print(f"Received: {received.hex(' ')}", flush=True)
+                try:
+                    count, distance = parse_feedback(received, frame)
+                except ValueError as exc:
+                    print(f"Feedback error: {exc}", file=sys.stderr)
+                    return 1
+                if count:
+                    print(f"Executed: {count}; devices after last executor: {distance}")
+                else:
+                    print("Executed: 0; no device executed the command")
     except KeyboardInterrupt:
         print("\nStopped listening.")
         return 0

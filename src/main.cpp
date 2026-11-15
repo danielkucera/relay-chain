@@ -82,6 +82,7 @@ int main(void)
     SysTick->CNT = 0;
     SysTick->CTLR = 1;
     const uint32_t ticksPerMs = SystemCoreClock / 8 / 1000;
+    const uint32_t frameTimeoutTicks = ((SystemCoreClock / 8) * 30 + UART_BAUD_RATE - 1) / UART_BAUD_RATE;
     uint32_t lastTicks = 0;
     uint32_t fractionalTicks = 0;
     uint32_t now = 0;
@@ -92,6 +93,7 @@ int main(void)
     uint8_t txHead = 0;
     uint8_t txTail = 0;
     RelayNode node;
+    FrameTimeout frameTimeout(frameTimeoutTicks);
     StatusLed statusLed;
     ResetAfterTransmit reset;
 
@@ -109,21 +111,32 @@ int main(void)
             ++now;
         }
 
+        if (!reset.waiting() && node.receiving() && frameTimeout.expired(ticks)) {
+            if (node.abort()) {
+                reset.request();
+            }
+            fault = true;
+            forwardingFailed = false;
+        }
+
         const uint16_t status = USART1->STATR;
         if (!reset.waiting() && (status & (USART_FLAG_ORE | USART_FLAG_NE | USART_FLAG_FE | USART_FLAG_PE))) {
             USART_ReceiveData(USART1);
-            node.resetParser();
+            if (node.abort()) {
+                reset.request();
+            }
             fault = true;
             forwardingFailed = false;
         } else if (!reset.waiting() && (status & USART_FLAG_RXNE)) {
             const uint8_t byte = USART_ReceiveData(USART1);
+            frameTimeout.received(ticks);
             const NodeResult result = node.receive(byte, now);
             frameReceived = result.frameComplete;
-            if ((result.forward || result.enableTx) && !txEnabled) {
+            if (result.forward && !txEnabled) {
                 uartBeginTx();
                 txEnabled = true;
             }
-            if (result.forward) {
+            if (result.forward && !forwardingFailed) {
                 const uint8_t nextHead = (txHead + 1) % sizeof(txBuffer);
                 if (nextHead == txTail) {
                     fault = true;
@@ -139,7 +152,7 @@ int main(void)
             if (result.disableStatusLed) {
                 statusLed.disable();
             }
-            if (result.reset && !forwardingFailed) {
+            if (result.reset) {
                 reset.request();
             }
             if (result.frameComplete) {

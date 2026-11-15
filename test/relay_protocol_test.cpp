@@ -3,434 +3,293 @@
 
 #include <assert.h>
 #include <stdint.h>
+#include <vector>
 
-static constexpr uint8_t InitializeFrame[] = {0, InitializeCommand, 0, 0, 0, 0, InitializeCommand};
+using Bytes = std::vector<uint8_t>;
 
-static void checkReset()
+static Bytes frame(uint8_t address, uint8_t command, uint32_t parameter = 0)
+{
+    Bytes bytes = {address, command, static_cast<uint8_t>(parameter >> 24),
+                   static_cast<uint8_t>(parameter >> 16),
+                   static_cast<uint8_t>(parameter >> 8), static_cast<uint8_t>(parameter)};
+    uint8_t checksum = 0;
+    for (uint8_t byte : bytes) checksum ^= byte;
+    bytes.insert(bytes.end(), {checksum, 0, 0xff, 0xff});
+    return bytes;
+}
+
+static Bytes send(RelayNode& node, const Bytes& input, bool* error = nullptr,
+                  unsigned* resets = nullptr, unsigned* ledOff = nullptr)
+{
+    Bytes output;
+    for (uint8_t byte : input) {
+        const NodeResult result = node.receive(byte, 100);
+        if (result.forward) output.push_back(result.forwardByte);
+        if (error && result.error) *error = true;
+        if (resets && result.reset) ++*resets;
+        if (ledOff && result.disableStatusLed) ++*ledOff;
+    }
+    return output;
+}
+
+static Bytes chain(RelayNode* nodes, unsigned length, Bytes bytes)
+{
+    for (unsigned i = 0; i < length; ++i) {
+        bool error = false;
+        bytes = send(nodes[i], bytes, &error);
+        assert(!error);
+    }
+    return bytes;
+}
+
+static void checkChain()
+{
+    RelayNode nodes[254];
+    for (unsigned address = 0; address < 254; ++address) {
+        const Bytes output = chain(nodes, 254, frame(address, 0xff));
+        assert(output.size() == 10);
+        assert(output[0] == NoRecipientAddress && output[1] == 0xff);
+        assert(output[6] == (NoRecipientAddress ^ 0xff));
+        assert(output[7] == 1 && output[8] == 253 - address);
+        assert(output[9] == (output[7] ^ output[8]));
+        for (unsigned i = 0; i < 254; ++i) assert(nodes[i].relayEnabled() == (i <= address));
+    }
+    Bytes output = chain(nodes, 254, frame(0xff, 0));
+    assert(output[0] == 0xff && output[1] == 0);
+    assert(output[7] == 254 && output[8] == 0 && output[9] == 254);
+    for (const RelayNode& node : nodes) assert(!node.relayEnabled());
+    output = chain(nodes, 254, frame(254, 0xff));
+    assert(output[0] == NoRecipientAddress && output[1] == 0xff);
+    assert(output[7] == 0 && output[8] == 0xff && output[9] == 0xff);
+
+    RelayNode timed[4];
+    output = chain(timed, 4, frame(1, 1, 123));
+    assert(output[7] == 1 && output[8] == 2);
+    assert(timed[1].relayEnabled());
+    timed[1].update(222);
+    assert(timed[1].relayEnabled());
+    timed[1].update(223);
+    assert(!timed[1].relayEnabled());
+}
+
+static void checkErrors()
 {
     RelayNode node;
-    const uint8_t local[] = {0, ResetCommand, 0, 0, 0, 0, ResetCommand};
-    const uint8_t invalid[] = {0, ResetCommand, 0, 0, 0, 0, 0};
-    const uint8_t broadcast[] = {0xff, ResetCommand, 0, 0, 0, 0, 0xfc};
-    const uint8_t forwarded[] = {1, ResetCommand, 0, 0, 0, 0, 2};
-    const uint8_t* frames[] = {invalid, local, broadcast, forwarded};
-    for (const uint8_t* frame : frames) {
-        for (unsigned i = 0; i < sizeof(local); ++i) {
-            const NodeResult result = node.receive(frame[i], 0);
-            assert(result.frameComplete == (i == 6));
-            assert(result.reset == (i == 6 && (frame == local || frame == broadcast)));
-            assert(result.error == (i == 6 && frame == invalid));
-            assert(result.forward == (frame == broadcast || frame == forwarded));
-            if (frame == broadcast) {
-                assert(result.forwardByte == frame[i]);
-            }
+    Bytes bad = frame(3, 0xff);
+    bad[6] ^= 1;
+    bool error = false;
+    unsigned resets = 0;
+    Bytes output = send(node, bad, &error, &resets);
+    assert(error && resets == 1 && output.size() == 6 && !node.relayEnabled());
+    error = false;
+    output = send(node, frame(0, 0xff), &error);
+    assert(!error && output.size() == 10 && node.relayEnabled());
+
+    bad = frame(0, 0);
+    bad[9] ^= 1;
+    error = false;
+    resets = 0;
+    output = send(node, bad, &error, &resets);
+    assert(error && resets == 0 && output.size() == 9 && !node.relayEnabled());
+
+    bad = frame(0, 0x7f);
+    error = false;
+    output = send(node, bad, &error);
+    assert(error && output.size() == 10 && output[7] == 0 && output[8] == 0xff);
+
+    bad = frame(0, 0xff);
+    bad[7] = 254;
+    bad[8] = 0;
+    bad[9] = 254;
+    error = false;
+    output = send(node, bad, &error);
+    assert(error && output.size() == 7 && node.relayEnabled());
+
+    bad = frame(1, 0xff);
+    bad[7] = 1;
+    bad[8] = 254;
+    bad[9] = 255;
+    error = false;
+    output = send(node, bad, &error);
+    assert(error && output.size() == 8);
+
+    bad = frame(0, 0xff);
+    bad[8] = 0;
+    bad[9] = 0;
+    error = false;
+    output = send(node, bad, &error);
+    assert(error && output.size() == 8);
+
+    bad = frame(0xff, 0);
+    bad[9] ^= 1;
+    RelayNode downstream;
+    error = false;
+    output = send(node, bad, &error);
+    assert(error && output.size() == 9 && !node.relayEnabled());
+    send(downstream, output);
+    assert(downstream.receiving() && !downstream.relayEnabled());
+    assert(!downstream.abort());
+
+    bad = frame(0xff, 0x7f);
+    error = false;
+    output = send(node, bad, &error);
+    assert(error && output.size() == 10 && output[7] == 0 && output[8] == 0xff);
+}
+
+static void checkStreaming()
+{
+    RelayNode nodes[3];
+    const Bytes input = frame(1, 0xff);
+    Bytes output;
+    for (unsigned i = 0; i < input.size(); ++i) {
+        uint8_t byte = input[i];
+        for (RelayNode& node : nodes) {
+            const NodeResult result = node.receive(byte, 100);
+            assert(result.forward && !result.error);
+            byte = result.forwardByte;
+        }
+        output.push_back(byte);
+        assert(nodes[1].relayEnabled() == (i >= 6));
+        assert(!nodes[0].relayEnabled() && !nodes[2].relayEnabled());
+    }
+    assert(output[7] == 1 && output[8] == 1 && output[9] == 0);
+
+    Bytes corrupt = frame(0xff, 0);
+    corrupt[6] ^= 1;
+    Bytes prefix = send(nodes[0], corrupt);
+    assert(prefix.size() == 6);
+    send(nodes[1], prefix);
+    assert(nodes[1].receiving());
+    assert(!nodes[1].abort());
+    const Bytes next = chain(nodes, 3, frame(0xff, 0));
+    assert(next[7] == 3 && next[8] == 0 && !nodes[1].relayEnabled());
+}
+
+static void checkNoRecipientAddress()
+{
+    RelayNode nodes[3];
+    for (uint8_t command : {uint8_t(0), uint8_t(0xff), uint8_t(1),
+                            InitializeCommand, ResetCommand, StatusLedOffCommand,
+                            uint8_t(0x05), uint8_t(0x7f)}) {
+        Bytes input = frame(NoRecipientAddress, command, 123);
+        for (RelayNode& node : nodes) {
+            bool error = false;
+            unsigned resets = 0;
+            unsigned ledOff = 0;
+            Bytes output = send(node, input, &error, &resets, &ledOff);
+            assert(!error && resets == 0 && ledOff == 0);
+            assert(output == input && !node.relayEnabled());
+            input = output;
         }
     }
 
-    ResetAfterTransmit reset;
-    assert(!reset.ready(true, false, false));
-    reset.request();
-    assert(reset.waiting());
-    assert(!reset.ready(false, true, true));
-    assert(!reset.ready(true, true, false));
-    assert(reset.ready(true, true, true));
-    assert(reset.ready(true, false, false));
+    Bytes unknown = frame(1, 0x05, 123);
+    bool error = false;
+    Bytes first = send(nodes[0], unknown, &error);
+    assert(!error && first[0] == 0 && first[1] == 0x05);
+    Bytes second = send(nodes[1], first, &error);
+    assert(error && second[0] == NoRecipientAddress && second[1] == 0x05);
+    assert(second[6] == (NoRecipientAddress ^ 0x05 ^ 123));
+    error = false;
+    Bytes third = send(nodes[2], second, &error);
+    assert(!error && third == second && third[7] == 0 && third[8] == 0xff);
+
+    Bytes invalid = frame(NoRecipientAddress, 0xff);
+    invalid[6] ^= 1;
+    unsigned resets = 0;
+    assert(send(nodes[0], invalid, &error, &resets).size() == 6);
+    assert(error && resets == 1 && !nodes[0].relayEnabled());
 }
 
-static void checkStatusLed()
+static void checkResetAndTimeout()
+{
+    RelayNode node;
+    Bytes reset = frame(0, ResetCommand);
+    for (unsigned i = 0; i < 9; ++i) {
+        const NodeResult result = node.receive(reset[i], 0);
+        assert(!result.reset && result.forward);
+    }
+    const NodeResult last = node.receive(reset[9], 0);
+    assert(last.reset && last.forward && last.frameComplete);
+    for (unsigned i = 0; i < 7; ++i) node.receive(reset[i], 0);
+    assert(node.receiving());
+    assert(node.abort() && !node.receiving());
+    node.receive(0, 0);
+    assert(!node.abort());
+    unsigned resets = 0;
+    send(node, frame(0xff, ResetCommand), nullptr, &resets);
+    assert(resets == 1);
+    Bytes badReset = frame(0, ResetCommand);
+    badReset[9] ^= 1;
+    bool error = false;
+    resets = 0;
+    assert(send(node, badReset, &error, &resets).size() == 9);
+    assert(error && resets == 1);
+    unsigned ledOff = 0;
+    send(node, frame(0, StatusLedOffCommand), nullptr, nullptr, &ledOff);
+    assert(ledOff == 1);
+
+    FrameTimeout timeout(3125);
+    timeout.received(UINT32_MAX - 1000);
+    assert(!timeout.expired(2123));
+    assert(timeout.expired(2124));
+
+    ResetAfterTransmit pending;
+    assert(!pending.ready(true, true, true));
+    pending.request();
+    assert(!pending.ready(false, true, true));
+    assert(!pending.ready(true, true, false));
+    assert(pending.ready(true, true, true));
+
+    for (uint8_t address : {uint8_t(0), uint8_t(3), BroadcastAddress}) {
+        RelayNode invalid;
+        const Bytes turnOn = frame(0, 0xff);
+        send(invalid, turnOn);
+        assert(invalid.relayEnabled());
+        Bytes bad = frame(address, 0);
+        bad[6] ^= 1;
+        for (unsigned i = 0; i < 7; ++i) {
+            const NodeResult result = invalid.receive(bad[i], 0);
+            assert(result.forward == (i < 6));
+            assert(result.error == (i == 6));
+            assert(!result.reset && !result.frameComplete);
+        }
+        assert(invalid.relayEnabled());
+        assert(invalid.abort());
+        assert(!invalid.receiving());
+    }
+}
+
+static void checkLedAndRelay()
 {
     StatusLed led;
     assert(!led.update(0, false, false, false));
-    assert(led.update(10, false, true, false));
-    assert(led.update(49, false, false, false));
-    assert(!led.update(50, false, false, false));
-    assert(!led.update(999, false, false, false));
     assert(led.update(1000, false, false, false));
-    assert(led.update(1999, false, false, false));
     assert(!led.update(2000, false, false, false));
-
-    assert(led.update(2500, false, true, true));
-    assert(led.update(2539, false, false, true));
-    assert(!led.update(2540, false, false, true));
-    assert(!led.update(4499, false, false, true));
+    assert(!led.update(2500, false, false, true));
     assert(led.update(4500, false, false, true));
-    assert(led.update(4599, false, false, true));
     assert(!led.update(4600, false, false, true));
-    assert(led.update(6500, false, false, true));
-    assert(!led.update(6501, false, true, true));
-    assert(!led.update(6540, false, false, true));
-    assert(led.update(6541, false, false, true));
-    assert(!led.update(6600, false, false, true));
-
-    StatusLed fault;
-    assert(!fault.update(1200, true, true, true));
-    assert(!fault.update(1250, true, true, true));
-    assert(!fault.update(1289, true, false, true));
-    assert(fault.update(1290, true, false, true));
-    assert(!fault.update(UINT32_MAX - 50, true, true, true));
-    assert(!fault.update(UINT32_MAX - 11, true, false, true));
-    assert(fault.update(UINT32_MAX - 10, true, false, true));
-    assert(!fault.update(UINT32_MAX - 10, true, true, true));
-    assert(!fault.update(28, true, false, true));
-    assert(fault.update(29, true, false, true));
+    assert(led.update(4700, false, true, true));
+    assert(!led.update(4740, false, false, true));
+    assert(led.update(4800, true, false, true));
     led.disable();
-    assert(!led.update(7000, true, true, true));
-    assert(!led.update(8000, true, false, true));
-    assert(!led.update(9000, false, true, true));
-    StatusLed restarted;
-    assert(restarted.update(0, true, false, false));
-
-    StatusLed rollover;
-    assert(!rollover.update(UINT32_MAX - 2100, false, false, true));
-    assert(rollover.update(UINT32_MAX - 100, false, false, true));
-    assert(rollover.update(UINT32_MAX - 1, false, false, true));
-    assert(!rollover.update(UINT32_MAX, false, false, true));
-    assert(!rollover.update(1898, false, false, true));
-    assert(rollover.update(1899, false, false, true));
-    assert(rollover.update(1998, false, false, true));
-    assert(!rollover.update(1999, false, false, true));
-}
-
-static void checkStatusLedOffCommand()
-{
-    RelayNode node;
-    StatusLed led;
-    const uint8_t on[] = {0, 0xff, 0, 0, 0, 0, 0xff};
-    for (uint8_t byte : on) {
-        node.receive(byte, 0);
-    }
-    assert(node.relayEnabled());
-    const uint8_t invalid[] = {0, StatusLedOffCommand, 0, 0, 0, 0, 0};
-    const uint8_t local[] = {0, StatusLedOffCommand, 0, 0, 0, 0, StatusLedOffCommand};
-    const uint8_t broadcast[] = {0xff, StatusLedOffCommand, 0, 0, 0, 0, 0xfb};
-    const uint8_t forwarded[] = {1, StatusLedOffCommand, 0, 0, 0, 0, 5};
-    const uint8_t* frames[] = {invalid, forwarded, local, broadcast};
-    for (const uint8_t* frame : frames) {
-        for (unsigned i = 0; i < sizeof(local); ++i) {
-            const NodeResult result = node.receive(frame[i], 100);
-            assert(result.disableStatusLed == (i == 6 && (frame == local || frame == broadcast)));
-            assert(result.error == (i == 6 && frame == invalid));
-            assert(result.forward == (frame == forwarded || frame == broadcast));
-            if (frame == broadcast) {
-                assert(result.forwardByte == frame[i]);
-            }
-            if (result.disableStatusLed) {
-                led.disable();
-            }
-            if (frame == invalid || frame == forwarded) {
-                assert(led.update(100, true, false, false));
-            } else if (frame == local && i == 6) {
-                assert(!led.update(100, true, true, false));
-            } else if (frame == broadcast) {
-                assert(!led.update(100, true, result.frameComplete, false));
-            }
-        }
-        assert(node.relayEnabled());
-    }
-    const uint8_t timed[] = {0, 1, 0, 0, 0, 10, 11};
-    for (uint8_t byte : timed) {
-        node.receive(byte, 200);
-    }
-    node.update(210);
-    assert(!node.relayEnabled());
-    assert(!led.update(210, true, true, false));
-}
-
-static void checkForwarding()
-{
-    for (unsigned address = 1; address < BroadcastAddress; ++address) {
-        for (unsigned corrupt = 0; corrupt <= 1; ++corrupt) {
-            const uint8_t input[] = {
-                static_cast<uint8_t>(address), 1, 0x12, 0x34, 0x56, 0x78,
-                static_cast<uint8_t>(address ^ 1 ^ 0x12 ^ 0x34 ^ 0x56 ^ 0x78 ^ corrupt)
-            };
-            uint8_t output[sizeof(input)] = {};
-            RelayProtocol first;
-            for (unsigned i = 0; i < sizeof(input); ++i) {
-                const ProtocolResult result = first.receive(input[i]);
-                assert(result.forward && !result.localComplete);
-                assert(result.frameComplete == (i == 6));
-                output[i] = result.forwardByte;
-                if (i == 0) {
-                    assert(output[i] == address - 1);
-                } else if (i < 6) {
-                    assert(output[i] == input[i]);
-                } else {
-                    assert(output[i] == (input[i] ^ address ^ (address - 1)));
-                }
-            }
-
-            RelayProtocol second;
-            for (unsigned i = 0; i < sizeof(output); ++i) {
-                const ProtocolResult result = second.receive(output[i]);
-                if (address == 1) {
-                    assert(!result.forward);
-                    if (i == 6) {
-                        assert(result.localComplete);
-                        assert(result.checksumValid == (corrupt == 0));
-                        assert(result.command == 1);
-                        assert(result.parameter == 0x12345678);
-                    }
-                } else {
-                    assert(result.forward && !result.localComplete);
-                    if (i == 0) {
-                        assert(result.forwardByte == address - 2);
-                    } else if (i == 6) {
-                        assert(result.forwardByte == (input[i] ^ address ^ (address - 2)));
-                    } else {
-                        assert(result.forwardByte == input[i]);
-                    }
-                }
-            }
-        }
-    }
-}
-
-static void checkDaisyChain(uint8_t address, bool corrupt)
-{
-    uint8_t frame[] = {address, 0xff, 0, 0, 0, 0,
-                       static_cast<uint8_t>(address ^ 0xff ^ corrupt)};
-    for (unsigned hop = 0; hop <= address; ++hop) {
-        RelayProtocol device;
-        RelayControl relay;
-        for (unsigned i = 0; i < sizeof(frame); ++i) {
-            const ProtocolResult result = device.receive(frame[i]);
-            if (hop < address) {
-                assert(result.forward && !result.localComplete);
-                frame[i] = result.forwardByte;
-            } else {
-                assert(!result.forward);
-                if (result.localComplete && result.checksumValid) {
-                    assert(relay.command(result.command, result.parameter, 0));
-                }
-            }
-        }
-        assert(relay.isEnabled() == (hop == address && !corrupt));
-    }
-}
-
-static NodeResult sendLocal(RelayNode& node, const uint8_t* frame, uint32_t now)
-{
-    NodeResult result = {};
-    for (unsigned i = 0; i < sizeof(InitializeFrame); ++i) {
-        result = node.receive(frame[i], now);
-        assert(!result.forward);
-        assert(result.frameComplete == (i + 1 == sizeof(InitializeFrame)));
-        if (i + 1 < sizeof(InitializeFrame)) {
-            assert(!result.error && !result.enableTx);
-        }
-    }
-    return result;
-}
-
-static void checkInitialization()
-{
-    RelayNode first;
-    const uint8_t invalid[] = {0, 0xff, 0, 0, 0, 0, 0};
-    NodeResult result = sendLocal(first, invalid, 0);
-    assert(result.error && !first.relayEnabled() && !result.enableTx);
-
-    const uint8_t invalidInit[] = {0, InitializeCommand, 0, 0, 0, 0, 0};
-    result = sendLocal(first, invalidInit, 0);
-    assert(result.error && !result.enableTx);
-
-    const uint8_t unknown[] = {0, 5, 0, 0, 0, 0, 5};
-    result = sendLocal(first, unknown, 0);
-    assert(result.error && !first.relayEnabled());
-
-    const uint8_t forwarded[] = {1, 0xff, 0, 0, 0, 0, 0xfe};
-    for (uint8_t byte : forwarded) {
-        result = first.receive(byte, 0);
-        assert(result.forward && !result.error);
-    }
-
-    const uint8_t on[] = {0, 0xff, 0, 0, 0, 0, 0xff};
-    result = sendLocal(first, on, 0);
-    assert(!result.forward && !result.error && !result.enableTx && first.relayEnabled());
-    result = sendLocal(first, InitializeFrame, 1);
-    assert(!result.forward && !result.error && result.enableTx && first.relayEnabled());
-    first.resetParser();
-    result = sendLocal(first, unknown, 2);
-    assert(result.error && !result.enableTx);
-
-    RelayNode chain[8];
-    for (RelayNode& node : chain) {
-        result = sendLocal(node, InitializeFrame, 0);
-        assert(!result.forward && !result.error && result.enableTx && !node.relayEnabled());
-        result = sendLocal(node, InitializeFrame, 1);
-        assert(!result.forward && !result.error && result.enableTx && !node.relayEnabled());
-    }
-
-    RelayNode timed;
-    const uint8_t timedOn[] = {0, 1, 0, 0, 0, 10, 11};
-    result = sendLocal(timed, timedOn, 10);
-    assert(!result.forward && !result.error && !result.enableTx && timed.relayEnabled());
-    result = sendLocal(timed, InitializeFrame, 15);
-    assert(!result.forward && !result.error && result.enableTx && timed.relayEnabled());
-    timed.update(20);
-    assert(!timed.relayEnabled());
-}
-
-static void checkTxEnabledStatus()
-{
-    const uint8_t frames[][7] = {
-        {1, 0xff, 0, 0, 0, 0, 0xfe},
-        {0xff, 0xff, 0, 0, 0, 0, 0},
-        {0, InitializeCommand, 0, 0, 0, 0, InitializeCommand},
-    };
-    for (unsigned frameIndex = 0; frameIndex < 3; ++frameIndex) {
-        RelayNode node;
-        StatusLed led;
-        bool txEnabled = false;
-        for (unsigned i = 0; i < 7; ++i) {
-            const NodeResult result = node.receive(frames[frameIndex][i], 100);
-            if (result.forward || result.enableTx) {
-                txEnabled = true;
-            }
-            assert(txEnabled == (frameIndex < 2 || i == 6));
-            led.update(100, false, result.frameComplete, txEnabled);
-        }
-        assert(!led.update(2099, false, false, txEnabled));
-        assert(led.update(2100, false, false, txEnabled));
-        assert(!led.update(2200, false, false, txEnabled));
-    }
-
-    RelayNode node;
-    const uint8_t invalid[] = {0, InitializeCommand, 0, 0, 0, 0, 0};
-    for (uint8_t byte : invalid) {
-        const NodeResult result = node.receive(byte, 0);
-        assert(!result.forward && !result.enableTx);
-    }
-}
-
-static void checkBroadcast()
-{
-    RelayNode chain[8];
-    uint8_t initialize[] = {0xff, InitializeCommand, 0, 0, 0, 0, 0xfd};
-    for (RelayNode& node : chain) {
-        for (unsigned i = 0; i < sizeof(initialize); ++i) {
-            uint8_t& byte = initialize[i];
-            const NodeResult result = node.receive(byte, 0);
-            assert(result.forward && result.forwardByte == byte && !result.error);
-            assert(result.frameComplete == (i + 1 == sizeof(initialize)));
-            assert(result.enableTx == (i + 1 == sizeof(initialize)));
-            assert(!node.relayEnabled());
-            byte = result.forwardByte;
-        }
-    }
-
-    const uint8_t on[] = {0xff, 0xff, 0, 0, 0, 0, 0};
-    const uint8_t off[] = {0xff, 0, 0, 0, 0, 0, 0xff};
-    const uint8_t timed[] = {0xff, 1, 0, 0, 0, 10, 0xf4};
-    const uint8_t invalid[] = {0xff, 0, 0, 0, 0, 0, 0xfe};
-    const uint8_t unknown[] = {0xff, 5, 0, 0, 0, 0, 0xfa};
-    const uint8_t* frames[] = {on, invalid, unknown, off, timed};
-
-    for (const uint8_t* frame : frames) {
-        for (RelayNode& node : chain) {
-            for (unsigned i = 0; i < sizeof(on); ++i) {
-                const NodeResult result = node.receive(frame[i], 100);
-                assert(result.forward && result.forwardByte == frame[i]);
-                assert(result.frameComplete == (i == 6));
-                assert(result.error == (i == 6 && (frame == invalid || frame == unknown)));
-                if (i < 6) {
-                    if (frame == invalid || frame == unknown || frame == off) {
-                        assert(node.relayEnabled());
-                    } else {
-                        assert(!node.relayEnabled());
-                    }
-                }
-            }
-            assert(node.relayEnabled() == (frame != off));
-        }
-    }
-
-    for (RelayNode& node : chain) {
-        node.update(109);
-        assert(node.relayEnabled());
-        node.update(110);
-        assert(!node.relayEnabled());
-        NodeResult result = sendLocal(node, InitializeFrame, 111);
-        assert(!result.forward && !result.error && result.enableTx);
-    }
-}
-
-int main()
-{
-    checkStatusLed();
-    checkStatusLedOffCommand();
-    checkReset();
-    checkForwarding();
-    checkInitialization();
-    checkTxEnabledStatus();
-    checkBroadcast();
-    for (unsigned address = 0; address < BroadcastAddress; ++address) {
-        checkDaisyChain(static_cast<uint8_t>(address), false);
-        checkDaisyChain(static_cast<uint8_t>(address), true);
-    }
-    RelayProtocol protocol;
-    const uint8_t local[] = {0, 1, 0x12, 0x34, 0x56, 0x78, 0x09};
-    for (unsigned i = 0; i < sizeof(local); ++i) {
-        const ProtocolResult result = protocol.receive(local[i]);
-        assert(!result.forward);
-        assert(result.localComplete == (i == 6));
-        if (result.localComplete) {
-            assert(result.checksumValid);
-            assert(result.command == 1);
-            assert(result.parameter == 0x12345678);
-        }
-    }
-
-    const uint8_t forwarded[] = {2, 0xff, 0, 0, 0, 0, 0};
-    for (uint8_t byte : forwarded) {
-        const ProtocolResult result = protocol.receive(byte);
-        assert(result.forward);
-        assert(!result.localComplete);
-    }
-    for (unsigned i = 0; i < sizeof(local); ++i) {
-        const ProtocolResult result = protocol.receive(i == 6 ? 0 : local[i]);
-        if (i == 6) {
-            assert(result.localComplete && !result.checksumValid);
-        }
-    }
-
-    protocol.receive(42);
-    protocol.reset();
-    for (unsigned i = 0; i < sizeof(local); ++i) {
-        const ProtocolResult result = protocol.receive(local[i]);
-        assert(!result.forward);
-        if (i == 6) {
-            assert(result.localComplete && result.checksumValid);
-        }
-    }
+    assert(!led.update(5000, true, true, true));
 
     RelayControl relay;
-    assert(!relay.isEnabled());
-    assert(relay.command(0xff, 0, 0));
-    assert(relay.isEnabled());
-    relay.update(100);
-    assert(relay.isEnabled());
-    assert(!relay.command(2, 0, 100));
-    assert(relay.isEnabled());
-    assert(relay.command(0, 0, 100));
-    assert(!relay.isEnabled());
-    assert(relay.command(1, 0, 100));
-    assert(!relay.isEnabled());
-
     assert(relay.command(1, 20, UINT32_MAX - 10));
-    relay.update(UINT32_MAX - 1);
-    assert(relay.isEnabled());
     relay.update(8);
     assert(relay.isEnabled());
     relay.update(9);
     assert(!relay.isEnabled());
-
+    assert(relay.command(1, 0, 10) && !relay.isEnabled());
+    assert(relay.command(0xff, 0, 10) && relay.isEnabled());
+    assert(!relay.command(0x7f, 0, 10) && relay.isEnabled());
+    assert(relay.command(0, 0, 10) && !relay.isEnabled());
     assert(relay.command(1, UINT32_MAX, 0));
     relay.update(UINT32_MAX - 2);
     assert(relay.isEnabled());
     relay.update(1);
     assert(!relay.isEnabled());
-
     assert(relay.command(1, 10, 0));
     relay.update(5);
     assert(relay.command(1, 10, 5));
@@ -438,11 +297,14 @@ int main()
     assert(relay.isEnabled());
     relay.update(15);
     assert(!relay.isEnabled());
+}
 
-    assert(relay.command(1, 10, 20));
-    assert(relay.command(0xff, 0, 21));
-    relay.update(31);
-    assert(relay.isEnabled());
-    assert(relay.command(0, 0, 32));
-    assert(!relay.isEnabled());
+int main()
+{
+    checkChain();
+    checkErrors();
+    checkStreaming();
+    checkNoRecipientAddress();
+    checkResetAndTimeout();
+    checkLedAndRelay();
 }

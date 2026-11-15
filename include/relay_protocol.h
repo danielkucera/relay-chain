@@ -5,77 +5,10 @@
 constexpr uint8_t InitializeCommand = 0x02;
 constexpr uint8_t ResetCommand = 0x03;
 constexpr uint8_t StatusLedOffCommand = 0x04;
+constexpr uint8_t NoRecipientAddress = 0xfe;
 constexpr uint8_t BroadcastAddress = 0xff;
-
-struct ProtocolResult {
-    bool forward;
-    uint8_t forwardByte;
-    bool frameComplete;
-    bool localComplete;
-    bool checksumValid;
-    uint8_t command;
-    uint32_t parameter;
-};
-
-class RelayProtocol {
-public:
-    ProtocolResult receive(uint8_t byte)
-    {
-        ProtocolResult result = {};
-        if (position == 0) {
-            forwardFrame = byte != 0;
-            broadcastFrame = byte == BroadcastAddress;
-            if (forwardFrame && !broadcastFrame) {
-                const uint8_t nextAddress = byte - 1;
-                checksumAdjustment = byte ^ nextAddress;
-            }
-            checksum = 0;
-            command = 0;
-            parameter = 0;
-        }
-
-        result.forward = forwardFrame;
-        result.frameComplete = position == 6;
-        if (forwardFrame) {
-            if (broadcastFrame) {
-                result.forwardByte = byte;
-            } else if (position == 0) {
-                result.forwardByte = byte - 1;
-            } else if (position == 6) {
-                result.forwardByte = byte ^ checksumAdjustment;
-            } else {
-                result.forwardByte = byte;
-            }
-        }
-        if (position < 6) {
-            checksum ^= byte;
-            if (position == 1) {
-                command = byte;
-            } else if (position >= 2) {
-                parameter = (parameter << 8) | byte;
-            }
-        } else if (!forwardFrame || broadcastFrame) {
-            result.localComplete = true;
-            result.checksumValid = checksum == byte;
-            result.command = command;
-            result.parameter = parameter;
-        }
-
-        position = (position + 1) % 7;
-        return result;
-    }
-
-    void reset() { position = 0; }
-
-private:
-    uint8_t position = 0;
-    uint8_t checksum = 0;
-    uint8_t command = 0;
-    uint8_t checksumAdjustment = 0;
-    uint32_t parameter = 0;
-    bool forwardFrame = false;
-    bool broadcastFrame = false;
-};
+constexpr uint8_t NoExecution = 0xff;
+constexpr uint8_t MaxStatusCount = 0xfe;
 
 class RelayControl {
 public:
@@ -131,41 +64,133 @@ struct NodeResult {
     bool error;
     bool reset;
     bool disableStatusLed;
-    bool enableTx;
 };
 
 class RelayNode {
 public:
     NodeResult receive(uint8_t byte, uint32_t now)
     {
-        const ProtocolResult received = protocol.receive(byte);
         NodeResult result = {};
-        result.forward = received.forward;
-        result.forwardByte = received.forwardByte;
-        result.frameComplete = received.frameComplete;
-        if (received.localComplete) {
-            if (!received.checksumValid) {
-                result.error = true;
-            } else if (received.command == InitializeCommand) {
-                result.enableTx = true;
-            } else if (received.command == ResetCommand) {
-                result.reset = true;
-            } else if (received.command == StatusLedOffCommand) {
-                result.disableStatusLed = true;
-            } else if (!relay.command(received.command, received.parameter, now)) {
-                result.error = true;
+        result.forward = !discard;
+        result.forwardByte = byte;
+        if (position == 0) {
+            addressed = byte == 0 || byte == BroadcastAddress;
+            commandXor = byte;
+            adjustment = 0;
+            parameter = 0;
+            executed = false;
+            pendingReset = false;
+            if (byte < NoRecipientAddress) {
+                result.forwardByte = byte == 0 ? NoRecipientAddress : byte - 1;
+                adjustment = byte ^ result.forwardByte;
             }
+        } else if (position < 6) {
+            commandXor ^= byte;
+            if (position == 1) {
+                command = byte;
+            } else {
+                parameter = (parameter << 8) | byte;
+            }
+        } else if (position == 6) {
+            if (commandXor != byte) {
+                result.error = true;
+                discard = true;
+                pendingReset = true;
+                result.forward = false;
+            } else {
+                result.forwardByte = byte ^ adjustment;
+                if (addressed) {
+                    if (command == InitializeCommand) {
+                        executed = true;
+                    } else if (command == ResetCommand) {
+                        pendingReset = true;
+                        executed = true;
+                    } else if (command == StatusLedOffCommand) {
+                        result.disableStatusLed = true;
+                        executed = true;
+                    } else {
+                        executed = relay.command(command, parameter, now);
+                        result.error = !executed;
+                    }
+                }
+            }
+        } else if (position == 7 && !discard) {
+            statusXor = byte;
+            count = byte;
+            if (count > MaxStatusCount || (executed && count == MaxStatusCount)) {
+                result.error = true;
+                discard = true;
+                result.forward = false;
+            } else if (executed) {
+                result.forwardByte = byte + 1;
+            }
+            adjustment = byte ^ result.forwardByte;
+        } else if (position == 8 && !discard) {
+            statusXor ^= byte;
+            if ((count == 0) != (byte == NoExecution) ||
+                (!executed && byte == MaxStatusCount)) {
+                result.error = true;
+                discard = true;
+                result.forward = false;
+            } else if (executed) {
+                result.forwardByte = 0;
+            } else if (byte != NoExecution) {
+                result.forwardByte = byte + 1;
+            }
+            adjustment ^= byte ^ result.forwardByte;
+        } else if (position == 9) {
+            result.frameComplete = true;
+            if (!discard && statusXor != byte) {
+                result.error = true;
+                result.forward = false;
+            } else if (!discard) {
+                result.forwardByte = byte ^ adjustment;
+            }
+            result.reset = pendingReset;
+            resetParser();
+            return result;
         }
+        ++position;
         return result;
     }
 
-    void resetParser() { protocol.reset(); }
+    bool abort()
+    {
+        const bool reset = pendingReset;
+        resetParser();
+        return reset;
+    }
+
+    bool receiving() const { return position != 0; }
     void update(uint32_t now) { relay.update(now); }
     bool relayEnabled() const { return relay.isEnabled(); }
 
 private:
-    RelayProtocol protocol;
+    void resetParser() { position = 0; discard = false; pendingReset = false; }
+
     RelayControl relay;
+    uint32_t parameter = 0;
+    uint8_t position = 0;
+    uint8_t command = 0;
+    uint8_t commandXor = 0;
+    uint8_t statusXor = 0;
+    uint8_t adjustment = 0;
+    uint8_t count = 0;
+    bool addressed = false;
+    bool executed = false;
+    bool pendingReset = false;
+    bool discard = false;
+};
+
+class FrameTimeout {
+public:
+    explicit FrameTimeout(uint32_t ticks) : timeoutTicks(ticks) {}
+    void received(uint32_t now) { lastByte = now; }
+    bool expired(uint32_t now) const { return now - lastByte >= timeoutTicks; }
+
+private:
+    uint32_t timeoutTicks;
+    uint32_t lastByte = 0;
 };
 
 class ResetAfterTransmit {
